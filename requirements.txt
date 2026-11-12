@@ -1,3 +1,4 @@
+
 streamlit
 pandas
 numpy
@@ -9,3 +10,4 @@ scikit-learn
 openpyxl
 xlsxwriter
 reportlab
+requests
