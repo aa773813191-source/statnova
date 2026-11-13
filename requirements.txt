@@ -10,3 +10,4 @@ openpyxl
 python-docx
 arabic-reshaper
 python-bidi
+pyreadstat
