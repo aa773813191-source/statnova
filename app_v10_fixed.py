@@ -1211,9 +1211,9 @@ elif page == "Smart Research Analyzer":
                 import html as _SRA_html
                 import arabic_reshaper as _SRA_reshaper
                 from bidi.algorithm import get_display as _SRA_get_display
-                _sra_font_path = _SRA_Path(__file__).with_name("NotoSansArabic-Regular.ttf")
+                _sra_font_path = _SRA_Path(__file__).with_name("NotoNaskhArabic-Regular.ttf")
                 if not _sra_font_path.exists():
-                    raise FileNotFoundError("Arabic font file NotoSansArabic-Regular.ttf is missing beside app_v10_fixed.py")
+                    raise FileNotFoundError("Arabic font file NotoNaskhArabic-Regular.ttf is missing beside app_v10_fixed.py")
                 if "STATNOVAArabic" not in _SRA_pdfmetrics.getRegisteredFontNames():
                     _SRA_pdfmetrics.registerFont(_SRA_TTFont("STATNOVAArabic", str(_sra_font_path)))
                 _sra_pdf = io.BytesIO()
