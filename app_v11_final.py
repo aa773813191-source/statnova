@@ -1233,6 +1233,7 @@ elif page == "Smart Research Analyzer":
             _sra_numeric = _sra_df.select_dtypes(include=np.number)
             _sra_missing = pd.DataFrame({"Variable": _sra_df.columns.astype(str), "Type": _sra_df.dtypes.astype(str).values, "Missing n": _sra_df.isna().sum().values, "Missing %": (_sra_df.isna().mean().values * 100).round(2)})
             _sra_desc = _sra_numeric.describe().T if len(_sra_numeric.columns) else pd.DataFrame()
+            if not _sra_desc.empty: _sra_desc.index.name = "Variable"
             _sra_categorical = _sra_df.select_dtypes(exclude=np.number)
             _sra_report_lines = [
                 "STATNOVA — Smart Research Analyzer | Complete Research Report",
@@ -1305,47 +1306,70 @@ elif page == "Smart Research Analyzer":
                 from docx.shared import Inches as _SRA_Inches, Pt as _SRA_Pt
                 _sra_doc = _SRA_Document()
                 _sra_section = _sra_doc.sections[0]
-                _sra_section.top_margin = _SRA_Inches(0.65)
-                _sra_section.bottom_margin = _SRA_Inches(0.65)
+                _sra_section.top_margin = _SRA_Inches(0.55)
+                _sra_section.bottom_margin = _SRA_Inches(0.55)
+                _sra_section.left_margin = _SRA_Inches(0.5)
+                _sra_section.right_margin = _SRA_Inches(0.5)
                 _sra_doc.add_heading("STATNOVA — Smart Research Analyzer", 0)
                 _sra_doc.add_paragraph(f"Source: {st.session_state.get('sra_source_name', 'Uploaded dataset')} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Rows: {len(_sra_df)} | Variables: {len(_sra_df.columns)}")
-                def _sra_add_table(_frame, _title, _max_rows=120):
+                def _sra_add_table(_frame, _title, _max_rows=120, _include_index=True):
                     _sra_doc.add_heading(_title, level=1)
-                    _frame = _frame.copy().reset_index()
+                    _frame = _frame.copy()
+                    if _include_index and _frame.index.name is not None:
+                        _frame = _frame.reset_index()
+                    elif _include_index and not isinstance(_frame.index, pd.RangeIndex):
+                        _frame = _frame.reset_index()
+                    else:
+                        _frame = _frame.reset_index(drop=True)
+                    # Never export pandas' synthetic index column.
+                    _frame = _frame.loc[:, [c for c in _frame.columns if str(c).lower() != 'index']]
                     if len(_frame) > _max_rows:
                         _frame = _frame.head(_max_rows)
+                    if _frame.empty:
+                        _sra_doc.add_paragraph("No data available.")
+                        return
                     _table = _sra_doc.add_table(rows=1, cols=max(1, len(_frame.columns)))
                     _table.style = "Table Grid"
                     _table.alignment = _SRA_TABLE_ALIGN.CENTER
+                    _table.autofit = True
+                    _hdr = _table.rows[0]
+                    _trPr = _hdr._tr.get_or_add_trPr()
+                    _repeat = _SRA_OxmlElement('w:tblHeader'); _repeat.set(_SRA_qn('w:val'), 'true'); _trPr.append(_repeat)
                     for _i, _col in enumerate(_frame.columns):
-                        _table.rows[0].cells[_i].text = str(_col)
+                        _hdr.cells[_i].text = str(_col)
                     for _, _rec in _frame.iterrows():
                         _cells = _table.add_row().cells
                         for _i, _val in enumerate(_rec.tolist()):
                             if _i < len(_cells):
-                                _cells[_i].text = "" if pd.isna(_val) else str(_val)[:160]
+                                if pd.isna(_val): _cells[_i].text = ""
+                                elif isinstance(_val, (float, np.floating)): _cells[_i].text = f"{float(_val):.4f}".rstrip('0').rstrip('.')
+                                else: _cells[_i].text = str(_val)[:100]
+                    _is_wide = len(_frame.columns) >= 7
                     for _row in _table.rows:
                         for _cell in _row.cells:
                             for _para in _cell.paragraphs:
+                                _para.paragraph_format.space_after = _SRA_Pt(0)
                                 for _run in _para.runs:
-                                    _run.font.size = _SRA_Pt(7.5)
+                                    _run.font.size = _SRA_Pt(5.5 if _is_wide else 8)
                 _sra_doc.add_heading("Research overview", level=1)
                 _sra_doc.add_paragraph(f"Research question: {st.session_state.get('sra_research_question','Not provided')}")
                 _sra_doc.add_paragraph(f"Population: {st.session_state.get('sra_population','Not provided')}")
                 _sra_doc.add_heading("Data quality", level=1)
-                _sra_add_table(_sra_missing, "Variable-level missingness")
+                _sra_add_table(_sra_missing, "Variable-level missingness", _include_index=False)
                 _sra_doc.add_paragraph(f"Duplicate rows: {int(_sra_df.duplicated().sum())} | Missing cells: {int(_sra_df.isna().sum().sum())}")
                 if not _sra_desc.empty:
-                    _sra_add_table(_sra_desc, "Descriptive statistics")
+                    _sra_add_table(_sra_desc, "Descriptive statistics", _include_index=True)
                 if len(_sra_numeric.columns) > 1:
-                    _sra_add_table(_sra_numeric.corr().round(4), "Correlation matrix")
-                if len(_sra_categorical.columns):
+                    _sra_corr = _sra_numeric.corr().round(4)
+                    _sra_corr.index.name = "Variable"
+                    _sra_add_table(_sra_corr, "Correlation matrix", _include_index=True)
+                _sra_cat_cols = [c for c in _sra_categorical.columns if str(c).strip().lower() not in {"participant_id", "participant id", "id", "record_id"}]
+                if _sra_cat_cols:
                     _sra_doc.add_heading("Categorical variable summaries", level=1)
-                    for _cat_col in _sra_categorical.columns:
-                        _sra_doc.add_heading(str(_cat_col), level=2)
+                    for _cat_col in _sra_cat_cols:
                         _cat_counts = _sra_df[_cat_col].value_counts(dropna=False).head(30).rename_axis("Category").reset_index(name="Frequency")
-                        _sra_add_table(_cat_counts, f"Frequency table — {_cat_col}", 30)
-                _sra_add_table(_sra_res_df, "Statistical results", 100)
+                        _sra_add_table(_cat_counts, f"Frequency table — {_cat_col}", 30, _include_index=False)
+                _sra_add_table(_sra_res_df, "Statistical results", 100, _include_index=False)
                 _sra_doc.add_heading("English interpretation", level=1)
                 _sra_doc.add_paragraph(str(_sra_edit_en or "Not provided"))
                 _sra_doc.add_heading("Arabic interpretation", level=1)
@@ -1371,47 +1395,108 @@ elif page == "Smart Research Analyzer":
             except Exception as _sra_docx_exc:
                 st.caption(f"Word export unavailable: {_sra_docx_exc}")
             try:
-                from reportlab.platypus import SimpleDocTemplate as _SRA_PDFDoc, Paragraph as _SRA_Paragraph, Spacer as _SRA_Spacer
+                from reportlab.platypus import SimpleDocTemplate as _SRA_PDFDoc, Paragraph as _SRA_Paragraph, Spacer as _SRA_Spacer, Table as _SRA_PDFTable, TableStyle as _SRA_TableStyle, LongTable as _SRA_LongTable, PageBreak as _SRA_PageBreak, Image as _SRA_PDFImage
+                from reportlab.lib import colors as _SRA_colors
                 from reportlab.lib.styles import getSampleStyleSheet as _SRA_Styles, ParagraphStyle as _SRA_ParagraphStyle
                 from reportlab.pdfbase import pdfmetrics as _SRA_pdfmetrics
                 from reportlab.pdfbase.ttfonts import TTFont as _SRA_TTFont
                 from reportlab.lib.enums import TA_RIGHT as _SRA_TA_RIGHT
+                from reportlab.lib import utils as _SRA_utils
                 from pathlib import Path as _SRA_Path
                 import html as _SRA_html
                 import arabic_reshaper as _SRA_reshaper
                 from bidi.algorithm import get_display as _SRA_get_display
                 _sra_font_path = _SRA_Path(__file__).with_name("NotoNaskhArabic-Regular.ttf")
                 if not _sra_font_path.exists():
-                    raise FileNotFoundError("Arabic font file NotoNaskhArabic-Regular.ttf is missing beside app_v10_fixed.py")
+                    raise FileNotFoundError("Arabic font file NotoNaskhArabic-Regular.ttf is missing beside app_v11_final.py")
                 if "STATNOVAArabic" not in _SRA_pdfmetrics.getRegisteredFontNames():
                     _SRA_pdfmetrics.registerFont(_SRA_TTFont("STATNOVAArabic", str(_sra_font_path)))
                 _sra_pdf = io.BytesIO()
                 _sra_story = []
                 _sra_styles = _SRA_Styles()
-                _sra_ar_style = _SRA_ParagraphStyle("STATNOVAArabic", parent=_sra_styles["BodyText"], fontName="STATNOVAArabic", alignment=_SRA_TA_RIGHT, leading=17)
-                _sra_title_style = _SRA_ParagraphStyle("STATNOVATitle", parent=_sra_styles["Title"], fontName="STATNOVAArabic", leading=22)
-                _sra_story.append(_SRA_Paragraph("STATNOVA — Smart Research Analyzer", _sra_title_style))
-                _sra_story.append(_SRA_Spacer(1, 12))
-                for _sra_line in _sra_report_lines:
-                    _sra_text = str(_sra_line)
-                    _sra_is_ar = any('\u0600' <= _ch <= '\u06ff' for _ch in _sra_text)
-                    _sra_safe_line = _SRA_html.escape(_sra_text) or "&nbsp;"
-                    if _sra_is_ar:
-                        _sra_safe_line = _SRA_get_display(_SRA_reshaper.reshape(_sra_safe_line))
-                        _sra_style = _sra_ar_style
+                _sra_body = _SRA_ParagraphStyle("STATNOVABody", parent=_sra_styles["BodyText"], fontName="Helvetica", fontSize=8, leading=11, spaceAfter=4)
+                _sra_heading = _SRA_ParagraphStyle("STATNOVAHeading", parent=_sra_styles["Heading2"], fontName="Helvetica-Bold", fontSize=12, leading=15, spaceBefore=9, spaceAfter=5, keepWithNext=True)
+                _sra_ar_style = _SRA_ParagraphStyle("STATNOVAArabic", parent=_sra_body, fontName="STATNOVAArabic", alignment=_SRA_TA_RIGHT, leading=15)
+                _sra_title_style = _SRA_ParagraphStyle("STATNOVATitle", parent=_sra_styles["Title"], fontName="Helvetica-Bold", fontSize=18, leading=22, spaceAfter=10)
+                _sra_cell = _SRA_ParagraphStyle("STATNOVACell", parent=_sra_body, fontSize=6.5, leading=8)
+                _sra_cell_header = _SRA_ParagraphStyle("STATNOVACellHeader", parent=_sra_cell, fontName="Helvetica-Bold", fontSize=6.5, leading=8)
+                def _sra_pdf_para(_value, _header=False):
+                    _v = "" if _value is None or (not isinstance(_value, str) and pd.isna(_value)) else str(_value)
+                    _v = _SRA_html.escape(_v).replace("\n", "<br/>")
+                    return _SRA_Paragraph(_v or "&nbsp;", _sra_cell_header if _header else _sra_cell)
+                def _sra_pdf_table(_frame, _title, _max_rows=120, _include_index=True):
+                    _sra_story.append(_SRA_Paragraph(_SRA_html.escape(_title), _sra_heading))
+                    _frame = _frame.copy()
+                    if _include_index and _frame.index.name is not None:
+                        _frame = _frame.reset_index()
+                    elif _include_index and not isinstance(_frame.index, pd.RangeIndex):
+                        _frame = _frame.reset_index()
                     else:
-                        _sra_style = _sra_styles["BodyText"]
-                    _sra_story.append(_SRA_Paragraph(_sra_safe_line, _sra_style))
-                    _sra_story.append(_SRA_Spacer(1, 5))
+                        _frame = _frame.reset_index(drop=True)
+                    _frame = _frame.loc[:, [c for c in _frame.columns if str(c).lower() != 'index']]
+                    if len(_frame) > _max_rows:
+                        _frame = _frame.head(_max_rows)
+                    if _frame.empty:
+                        _sra_story.append(_SRA_Paragraph("No data available.", _sra_body)); return
+                    _data = [[_sra_pdf_para(c, True) for c in _frame.columns]]
+                    for _rec in _frame.itertuples(index=False, name=None):
+                        _row = []
+                        for _v in _rec:
+                            if isinstance(_v, (float, np.floating)) and pd.notna(_v): _v = f"{float(_v):.4f}".rstrip('0').rstrip('.')
+                            _row.append(_sra_pdf_para(_v))
+                        _data.append(_row)
+                    _n = len(_frame.columns)
+                    _available = 515
+                    _width = _available / max(1, _n)
+                    _widths = [_width] * _n
+                    _tbl = _SRA_LongTable(_data, colWidths=_widths, repeatRows=1, hAlign="LEFT")
+                    _tbl.setStyle(_SRA_TableStyle([
+                        ("BACKGROUND", (0,0), (-1,0), _SRA_colors.HexColor("#e7f0f3")),
+                        ("TEXTCOLOR", (0,0), (-1,0), _SRA_colors.HexColor("#183b56")),
+                        ("GRID", (0,0), (-1,-1), 0.35, _SRA_colors.HexColor("#9aa7b2")),
+                        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+                        ("LEFTPADDING", (0,0), (-1,-1), 3), ("RIGHTPADDING", (0,0), (-1,-1), 3),
+                        ("TOPPADDING", (0,0), (-1,-1), 3), ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                    ]))
+                    _sra_story.append(_tbl)
+                    _sra_story.append(_SRA_Spacer(1, 7))
+                _sra_story.append(_SRA_Paragraph("STATNOVA — Smart Research Analyzer", _sra_title_style))
+                _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Source: {st.session_state.get('sra_source_name', 'Uploaded dataset')} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Rows: {len(_sra_df)} | Variables: {len(_sra_df.columns)}"), _sra_body))
+                _sra_story.append(_SRA_Paragraph("Research overview", _sra_heading))
+                _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Research question: {st.session_state.get('sra_research_question','Not provided')}"), _sra_body))
+                _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Population: {st.session_state.get('sra_population','Not provided')}"), _sra_body))
+                _sra_story.append(_SRA_Paragraph("Data quality", _sra_heading))
+                _sra_pdf_table(_sra_missing, "Variable-level missingness", _include_index=False)
+                _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Duplicate rows: {int(_sra_df.duplicated().sum())} | Missing cells: {int(_sra_df.isna().sum().sum())}"), _sra_body))
+                if not _sra_desc.empty: _sra_pdf_table(_sra_desc, "Descriptive statistics", _include_index=True)
+                if len(_sra_numeric.columns) > 1:
+                    _sra_corr = _sra_numeric.corr().round(4); _sra_corr.index.name = "Variable"
+                    _sra_pdf_table(_sra_corr, "Correlation matrix", _include_index=True)
+                _sra_cat_cols = [c for c in _sra_categorical.columns if str(c).strip().lower() not in {"participant_id", "participant id", "id", "record_id"}]
+                if _sra_cat_cols:
+                    _sra_story.append(_SRA_Paragraph("Categorical variable summaries", _sra_heading))
+                    for _cat_col in _sra_cat_cols:
+                        _cat_counts = _sra_df[_cat_col].value_counts(dropna=False).head(30).rename_axis("Category").reset_index(name="Frequency")
+                        _sra_pdf_table(_cat_counts, f"Frequency table — {_cat_col}", 30, _include_index=False)
+                _sra_pdf_table(_sra_res_df, "Statistical results", 100, _include_index=False)
+                _sra_story.append(_SRA_Paragraph("English interpretation", _sra_heading))
+                _sra_story.append(_SRA_Paragraph(_SRA_html.escape(str(_sra_edit_en or "Not provided")), _sra_body))
+                _sra_story.append(_SRA_Paragraph("Arabic interpretation", _sra_heading))
+                _sra_ar_text = _SRA_html.escape(str(_sra_edit_ar or "غير متوفر"))
+                _sra_ar_text = _SRA_get_display(_SRA_reshaper.reshape(_sra_ar_text))
+                _sra_story.append(_SRA_Paragraph(_sra_ar_text, _sra_ar_style))
+                _sra_story.append(_SRA_Paragraph("Assumptions, effect sizes and confidence intervals", _sra_heading))
+                _sra_story.append(_SRA_Paragraph("Only diagnostics and estimates actually computed by the selected analysis are reported. Unavailable results are not inferred or fabricated.", _sra_body))
+                _sra_story.append(_SRA_Paragraph("Limitations", _sra_heading))
+                _sra_story.append(_SRA_Paragraph("Interpret findings alongside study design, data quality, sample size, assumptions, effect estimates, uncertainty and practical relevance.", _sra_body))
                 if _sra_chart_buffers:
-                    from reportlab.platypus import Image as _SRA_PDFImage
-                    from reportlab.lib.utils import ImageReader as _SRA_ImageReader
-                    _sra_story.append(_SRA_Paragraph("Distribution charts", _sra_styles["Heading2"]))
+                    _sra_story.append(_SRA_PageBreak())
+                    _sra_story.append(_SRA_Paragraph("Distribution charts", _sra_heading))
                     for _sra_chart_name, _sra_chart_bytes in _sra_chart_buffers:
-                        _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Distribution: {_sra_chart_name}"), _sra_styles["BodyText"]))
+                        _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Distribution: {_sra_chart_name}"), _sra_body))
                         _sra_story.append(_SRA_PDFImage(io.BytesIO(_sra_chart_bytes), width=470, height=235))
                         _sra_story.append(_SRA_Spacer(1, 8))
-                _SRA_PDFDoc(_sra_pdf).build(_sra_story)
+                _SRA_PDFDoc(_sra_pdf, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=38, bottomMargin=38).build(_sra_story)
                 st.download_button("Download PDF report", _sra_pdf.getvalue(), "statnova_smart_research_report.pdf", "application/pdf", key="sra_pdf_export")
             except Exception as _sra_pdf_exc:
                 st.caption(f"PDF export unavailable: {_sra_pdf_exc}. Ensure arabic-reshaper, python-bidi, and the bundled Arabic font are included.")
