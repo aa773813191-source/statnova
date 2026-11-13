@@ -1197,7 +1197,49 @@ elif page == "Smart Research Analyzer":
                 _sra_edit_ar = "لا توجد نتيجة استدلالية متاحة بعد."
 
         with st.expander("6 · Export analysis", expanded=True):
-            _sra_report_lines = ["STATNOVA — Smart Research Analyzer", f"Source: {_sra_source}", f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", f"Rows: {len(_sra_df)}", f"Variables: {len(_sra_df.columns)}", f"Research question: {st.session_state.get('sra_research_question','')}", f"Population: {st.session_state.get('sra_population','')}", "", "English interpretation:", _sra_edit_en, "", "Arabic interpretation:", _sra_edit_ar, "", "Statistical results:", _sra_res_df.to_string(index=False)]
+            _sra_numeric = _sra_df.select_dtypes(include=np.number)
+            _sra_missing = pd.DataFrame({"Variable": _sra_df.columns.astype(str), "Type": _sra_df.dtypes.astype(str).values, "Missing n": _sra_df.isna().sum().values, "Missing %": (_sra_df.isna().mean().values * 100).round(2)})
+            _sra_desc = _sra_numeric.describe().T if len(_sra_numeric.columns) else pd.DataFrame()
+            _sra_categorical = _sra_df.select_dtypes(exclude=np.number)
+            _sra_report_lines = [
+                "STATNOVA — Smart Research Analyzer | Complete Research Report",
+                f"Source: {_sra_source}", f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                f"Rows: {len(_sra_df)}", f"Variables: {len(_sra_df.columns)}",
+                f"Duplicate rows: {int(_sra_df.duplicated().sum())}",
+                f"Missing cells: {int(_sra_df.isna().sum().sum())}",
+                f"Research question: {st.session_state.get('sra_research_question','')}",
+                f"Population: {st.session_state.get('sra_population','')}",
+                "", "DATA QUALITY AND VARIABLE PROFILE:", _sra_missing.to_string(index=False),
+                "", "DESCRIPTIVE STATISTICS (all numeric variables):",
+                _sra_desc.to_string() if not _sra_desc.empty else "No numeric variables available.",
+                "", "CATEGORICAL VARIABLE SUMMARIES:",
+                "\n\n".join([f"{c}:\n{_sra_df[c].value_counts(dropna=False).head(30).to_string()}" for c in _sra_categorical.columns]) if len(_sra_categorical.columns) else "No categorical variables.",
+                "", "CORRELATION MATRIX (numeric variables):",
+                _sra_numeric.corr().round(4).to_string() if len(_sra_numeric.columns) > 1 else "Not available: fewer than two numeric variables.",
+                "", "STATISTICAL RESULTS:", _sra_res_df.to_string(index=False),
+                "", "ENGLISH INTERPRETATION:", _sra_edit_en,
+                "", "ARABIC INTERPRETATION:", _sra_edit_ar,
+                "", "ASSUMPTIONS, EFFECT SIZES AND CONFIDENCE INTERVALS:",
+                "Only diagnostics and estimates actually computed by the selected analysis are reported. Any unavailable assumption test, effect size, or confidence interval is not inferred or fabricated.",
+                "", "VISUALIZATIONS:", "Distribution charts for available numeric variables are included in PDF and Word exports where chart generation succeeds.",
+                "", "LIMITATIONS:", "Statistical interpretation must be considered alongside study design, data quality, sample size, assumptions, effect estimates, uncertainty, and practical relevance."
+            ]
+            _sra_chart_buffers = []
+            try:
+                import matplotlib.pyplot as _sra_plt
+                for _sra_col in _sra_numeric.columns[:6]:
+                    _sra_vals = _sra_numeric[_sra_col].dropna()
+                    if len(_sra_vals) >= 2:
+                        _sra_fig, _sra_ax = _sra_plt.subplots(figsize=(7, 3.5))
+                        _sra_ax.hist(_sra_vals, bins="auto", edgecolor="black")
+                        _sra_ax.set_title(f"Distribution: {_sra_col}")
+                        _sra_ax.set_xlabel(str(_sra_col)); _sra_ax.set_ylabel("Frequency")
+                        _sra_fig.tight_layout()
+                        _sra_img = io.BytesIO(); _sra_fig.savefig(_sra_img, format="png", dpi=160); _sra_img.seek(0)
+                        _sra_chart_buffers.append((_sra_col, _sra_img.getvalue()))
+                        _sra_plt.close(_sra_fig)
+            except Exception:
+                _sra_chart_buffers = []
             _sra_csv = _sra_df.to_csv(index=False).encode("utf-8-sig")
             st.download_button("Download analyzed dataset (CSV)", _sra_csv, "statnova_analyzed_dataset.csv", "text/csv", key="sra_csv_export")
             try:
@@ -1213,6 +1255,11 @@ elif page == "Smart Research Analyzer":
                 _sra_profile.to_excel(_sra_writer, sheet_name="Variable_Profile", index=False)
                 _sra_res_df.to_excel(_sra_writer, sheet_name="Analysis_Results", index=False)
                 pd.DataFrame([{"Research question": st.session_state.get("sra_research_question", ""), "Population": st.session_state.get("sra_population", ""), "English interpretation": _sra_edit_en, "Arabic interpretation": _sra_edit_ar}]).to_excel(_sra_writer, sheet_name="Interpretation", index=False)
+                _sra_missing.to_excel(_sra_writer, sheet_name="Data_Quality", index=False)
+                _sra_desc.to_excel(_sra_writer, sheet_name="Descriptive_Statistics")
+                if len(_sra_numeric.columns) > 1:
+                    _sra_numeric.corr().to_excel(_sra_writer, sheet_name="Correlations")
+                _sra_df.describe(include="all").transpose().to_excel(_sra_writer, sheet_name="Full_Profile")
             st.download_button("Download complete Excel report", _sra_excel.getvalue(), "statnova_smart_analysis.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="sra_xlsx_export")
             _sra_txt = "\n".join(_sra_report_lines).encode("utf-8")
             st.download_button("Download research report (TXT)", _sra_txt, "statnova_smart_research_report.txt", "text/plain", key="sra_txt_export")
@@ -1242,6 +1289,11 @@ elif page == "Smart Research Analyzer":
                             if _sra_rFonts is not None:
                                 _sra_rFonts.set(_SRA_qn('w:cs'), 'Noto Naskh Arabic')
                                 _sra_rFonts.set(_SRA_qn('w:eastAsia'), 'Noto Naskh Arabic')
+                if _sra_chart_buffers:
+                    _sra_doc.add_heading("Distribution charts", level=1)
+                    for _sra_chart_name, _sra_chart_bytes in _sra_chart_buffers:
+                        _sra_doc.add_paragraph(f"Distribution: {_sra_chart_name}")
+                        _sra_doc.add_picture(io.BytesIO(_sra_chart_bytes), width=__import__("docx").shared.Inches(6.0))
                 _sra_docx = io.BytesIO()
                 _sra_doc.save(_sra_docx)
                 st.download_button("Download Word report", _sra_docx.getvalue(), "statnova_smart_research_report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="sra_docx_export")
@@ -1280,6 +1332,14 @@ elif page == "Smart Research Analyzer":
                         _sra_style = _sra_styles["BodyText"]
                     _sra_story.append(_SRA_Paragraph(_sra_safe_line, _sra_style))
                     _sra_story.append(_SRA_Spacer(1, 5))
+                if _sra_chart_buffers:
+                    from reportlab.platypus import Image as _SRA_PDFImage
+                    from reportlab.lib.utils import ImageReader as _SRA_ImageReader
+                    _sra_story.append(_SRA_Paragraph("Distribution charts", _sra_styles["Heading2"]))
+                    for _sra_chart_name, _sra_chart_bytes in _sra_chart_buffers:
+                        _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Distribution: {_sra_chart_name}"), _sra_styles["BodyText"]))
+                        _sra_story.append(_SRA_PDFImage(io.BytesIO(_sra_chart_bytes), width=470, height=235))
+                        _sra_story.append(_SRA_Spacer(1, 8))
                 _SRA_PDFDoc(_sra_pdf).build(_sra_story)
                 st.download_button("Download PDF report", _sra_pdf.getvalue(), "statnova_smart_research_report.pdf", "application/pdf", key="sra_pdf_export")
             except Exception as _sra_pdf_exc:
