@@ -920,14 +920,47 @@ elif page == "Reports & Export":
             _doc.add_paragraph(f"Source: {st.session_state.source_name} | Rows: {len(df)} | Variables: {len(df.columns)}")
             _doc.add_heading("Data quality", level=1)
             _doc.add_paragraph(f"Duplicate rows: {int(df.duplicated().sum())}; missing cells: {int(df.isna().sum().sum())}")
-            _doc.add_heading("Variable profile", level=1)
-            _doc.add_paragraph(df.dtypes.astype(str).to_string())
+            from docx.enum.table import WD_TABLE_ALIGNMENT
+            from docx.shared import Inches, Pt
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn
+            def _add_docx_table(_document, _frame, _max_rows=120):
+                _frame = _frame.copy().reset_index()
+                if len(_frame) > _max_rows:
+                    _frame = _frame.head(_max_rows)
+                _table = _document.add_table(rows=1, cols=max(1, len(_frame.columns)))
+                _table.style = "Table Grid"
+                _table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                for _i, _col in enumerate(_frame.columns):
+                    _table.rows[0].cells[_i].text = str(_col)
+                for _, _record in _frame.iterrows():
+                    _cells = _table.add_row().cells
+                    for _i, _value in enumerate(_record.tolist()):
+                        if _i < len(_cells):
+                            _cells[_i].text = "" if pd.isna(_value) else str(_value)[:180]
+                for _row in _table.rows:
+                    for _cell in _row.cells:
+                        for _para in _cell.paragraphs:
+                            for _run in _para.runs:
+                                _run.font.size = Pt(8)
+                return _table
+            _doc.add_heading("Data quality and variable profile", level=1)
+            _quality_doc = pd.DataFrame({"Variable": df.columns.astype(str), "Data type": df.dtypes.astype(str).values,
+                "Missing n": df.isna().sum().values, "Missing %": (df.isna().mean().values*100).round(2)})
+            _add_docx_table(_doc, _quality_doc)
+            _doc.add_paragraph(f"Duplicate rows: {int(df.duplicated().sum())} | Missing cells: {int(df.isna().sum().sum())}")
             _doc.add_heading("Descriptive statistics", level=1)
-            _doc.add_paragraph(df.describe(include="all").transpose().to_string())
+            _desc_doc = df.describe(include="all").transpose().reset_index().rename(columns={"index":"Variable"})
+            _add_docx_table(_doc, _desc_doc)
             _last = st.session_state.last_result or {"Status": "No inferential test recorded in this session"}
             _doc.add_heading("Statistical analysis", level=1)
-            for _k, _v in _last.items():
-                _doc.add_paragraph(f"{_k}: {_v}")
+            _result_doc = pd.DataFrame([{"Measure": str(_k), "Result": str(_v)} for _k, _v in _last.items()])
+            _add_docx_table(_doc, _result_doc)
+            _numeric_doc = df.select_dtypes(include=np.number)
+            if len(_numeric_doc.columns) > 1:
+                _doc.add_heading("Correlation matrix", level=1)
+                _corr_doc = _numeric_doc.corr().round(4).reset_index().rename(columns={"index":"Variable"})
+                _add_docx_table(_doc, _corr_doc)
             _doc.add_heading("Interpretation and limitations", level=1)
             _doc.add_paragraph("Interpret results in the context of study design, assumptions, effect size, confidence intervals, sample size and practical relevance. No unperformed analysis is represented as a result.")
             _docx_buffer = io.BytesIO(); _doc.save(_docx_buffer)
@@ -1268,32 +1301,70 @@ elif page == "Smart Research Analyzer":
                 from docx.enum.text import WD_ALIGN_PARAGRAPH as _SRA_ALIGN
                 from docx.oxml import OxmlElement as _SRA_OxmlElement
                 from docx.oxml.ns import qn as _SRA_qn
+                from docx.enum.table import WD_TABLE_ALIGNMENT as _SRA_TABLE_ALIGN
+                from docx.shared import Inches as _SRA_Inches, Pt as _SRA_Pt
                 _sra_doc = _SRA_Document()
+                _sra_section = _sra_doc.sections[0]
+                _sra_section.top_margin = _SRA_Inches(0.65)
+                _sra_section.bottom_margin = _SRA_Inches(0.65)
                 _sra_doc.add_heading("STATNOVA — Smart Research Analyzer", 0)
-                for _sra_line in _sra_report_lines:
-                    _sra_text = str(_sra_line)
-                    _sra_para = _sra_doc.add_paragraph(_sra_text)
-                    _sra_is_ar = any('\u0600' <= _ch <= '\u06ff' for _ch in _sra_text)
-                    if _sra_is_ar:
-                        _sra_para.alignment = _SRA_ALIGN.RIGHT
-                        _sra_pPr = _sra_para._p.get_or_add_pPr()
-                        _sra_bidi = _SRA_OxmlElement('w:bidi')
-                        _sra_bidi.set(_SRA_qn('w:val'), '1')
-                        _sra_pPr.append(_sra_bidi)
-                        for _sra_run in _sra_para.runs:
-                            _sra_rPr = _sra_run._element.get_or_add_rPr()
-                            _sra_rtl = _SRA_OxmlElement('w:rtl')
-                            _sra_rtl.set(_SRA_qn('w:val'), '1')
-                            _sra_rPr.append(_sra_rtl)
-                            _sra_rFonts = _sra_rPr.rFonts
-                            if _sra_rFonts is not None:
-                                _sra_rFonts.set(_SRA_qn('w:cs'), 'Noto Naskh Arabic')
-                                _sra_rFonts.set(_SRA_qn('w:eastAsia'), 'Noto Naskh Arabic')
+                _sra_doc.add_paragraph(f"Source: {st.session_state.get('sra_source_name', 'Uploaded dataset')} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Rows: {len(_sra_df)} | Variables: {len(_sra_df.columns)}")
+                def _sra_add_table(_frame, _title, _max_rows=120):
+                    _sra_doc.add_heading(_title, level=1)
+                    _frame = _frame.copy().reset_index()
+                    if len(_frame) > _max_rows:
+                        _frame = _frame.head(_max_rows)
+                    _table = _sra_doc.add_table(rows=1, cols=max(1, len(_frame.columns)))
+                    _table.style = "Table Grid"
+                    _table.alignment = _SRA_TABLE_ALIGN.CENTER
+                    for _i, _col in enumerate(_frame.columns):
+                        _table.rows[0].cells[_i].text = str(_col)
+                    for _, _rec in _frame.iterrows():
+                        _cells = _table.add_row().cells
+                        for _i, _val in enumerate(_rec.tolist()):
+                            if _i < len(_cells):
+                                _cells[_i].text = "" if pd.isna(_val) else str(_val)[:160]
+                    for _row in _table.rows:
+                        for _cell in _row.cells:
+                            for _para in _cell.paragraphs:
+                                for _run in _para.runs:
+                                    _run.font.size = _SRA_Pt(7.5)
+                _sra_doc.add_heading("Research overview", level=1)
+                _sra_doc.add_paragraph(f"Research question: {st.session_state.get('sra_research_question','Not provided')}")
+                _sra_doc.add_paragraph(f"Population: {st.session_state.get('sra_population','Not provided')}")
+                _sra_doc.add_heading("Data quality", level=1)
+                _sra_add_table(_sra_missing, "Variable-level missingness")
+                _sra_doc.add_paragraph(f"Duplicate rows: {int(_sra_df.duplicated().sum())} | Missing cells: {int(_sra_df.isna().sum().sum())}")
+                if not _sra_desc.empty:
+                    _sra_add_table(_sra_desc, "Descriptive statistics")
+                if len(_sra_numeric.columns) > 1:
+                    _sra_add_table(_sra_numeric.corr().round(4), "Correlation matrix")
+                if len(_sra_categorical.columns):
+                    _sra_doc.add_heading("Categorical variable summaries", level=1)
+                    for _cat_col in _sra_categorical.columns:
+                        _sra_doc.add_heading(str(_cat_col), level=2)
+                        _cat_counts = _sra_df[_cat_col].value_counts(dropna=False).head(30).rename_axis("Category").reset_index(name="Frequency")
+                        _sra_add_table(_cat_counts, f"Frequency table — {_cat_col}", 30)
+                _sra_add_table(_sra_res_df, "Statistical results", 100)
+                _sra_doc.add_heading("English interpretation", level=1)
+                _sra_doc.add_paragraph(str(_sra_edit_en or "Not provided"))
+                _sra_doc.add_heading("Arabic interpretation", level=1)
+                _sra_ar_para = _sra_doc.add_paragraph(str(_sra_edit_ar or "غير متوفر"))
+                _sra_ar_para.alignment = _SRA_ALIGN.RIGHT
+                _sra_pPr = _sra_ar_para._p.get_or_add_pPr()
+                _sra_bidi = _SRA_OxmlElement('w:bidi'); _sra_bidi.set(_SRA_qn('w:val'), '1'); _sra_pPr.append(_sra_bidi)
+                for _run in _sra_ar_para.runs:
+                    _rPr = _run._element.get_or_add_rPr(); _rtl = _SRA_OxmlElement('w:rtl'); _rtl.set(_SRA_qn('w:val'), '1'); _rPr.append(_rtl)
+                _sra_doc.add_heading("Assumptions, effect sizes and confidence intervals", level=1)
+                _sra_doc.add_paragraph("Only diagnostics and estimates actually computed by the selected analysis are reported. Unavailable results are not inferred or fabricated.")
+                _sra_doc.add_heading("Limitations", level=1)
+                _sra_doc.add_paragraph("Interpret findings alongside study design, data quality, sample size, assumptions, effect estimates, uncertainty and practical relevance.")
                 if _sra_chart_buffers:
+                    _sra_doc.add_page_break()
                     _sra_doc.add_heading("Distribution charts", level=1)
                     for _sra_chart_name, _sra_chart_bytes in _sra_chart_buffers:
                         _sra_doc.add_paragraph(f"Distribution: {_sra_chart_name}")
-                        _sra_doc.add_picture(io.BytesIO(_sra_chart_bytes), width=__import__("docx").shared.Inches(6.0))
+                        _sra_doc.add_picture(io.BytesIO(_sra_chart_bytes), width=_SRA_Inches(5.8))
                 _sra_docx = io.BytesIO()
                 _sra_doc.save(_sra_docx)
                 st.download_button("Download Word report", _sra_docx.getvalue(), "statnova_smart_research_report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="sra_docx_export")
