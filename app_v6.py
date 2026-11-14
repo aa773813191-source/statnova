@@ -1288,9 +1288,84 @@ elif page == "Smart Research Analyzer":
         _sra_results = []
         if "sra_test_history" not in st.session_state:
             st.session_state.sra_test_history = []
-        with st.expander("4 · Guided statistical analysis", expanded=True):
-            st.caption("Choose the study design explicitly. STATNOVA does not infer pairing, randomization, or causality from column names.")
-            _sra_design = st.selectbox("Study design", ["Independent groups", "Paired measurements", "One-sample comparison", "Association / correlation", "Prediction / regression"], key="sra_design")
+
+        # Smart design detection: column names are suggestions only; pairing requires researcher confirmation.
+        _sra_pair_idx = preferred_pre_post_columns(_sra_num)
+        _sra_pair_suggestion = (_sra_num[_sra_pair_idx[0]], _sra_num[_sra_pair_idx[1]]) if len(_sra_num) >= 2 and _sra_pair_idx[0] != _sra_pair_idx[1] else None
+        _sra_pair_tokens_found = bool(_sra_pair_suggestion and any(t in str(_sra_pair_suggestion[0]).lower() for t in ("pre", "before", "baseline", "initial", "قبل")) and any(t in str(_sra_pair_suggestion[1]).lower() for t in ("post", "after", "follow", "final", "بعد")))
+        with st.expander("4 · Smart analysis recommendation", expanded=bool(_sra_pair_tokens_found)):
+            if _sra_pair_tokens_found:
+                _sra_pre_suggest, _sra_post_suggest = _sra_pair_suggestion
+                st.success(f"Possible repeated-measures structure detected: {_sra_pre_suggest} → {_sra_post_suggest}")
+                st.caption("Name matching is not proof of pairing. Confirm that each row represents the same participant/unit in both columns and that row order is aligned.")
+                _sra_confirm_auto_pair = st.checkbox("I confirm these are paired measurements from the same participants/units, aligned row by row", key="sra_auto_pair_confirm")
+                if _sra_confirm_auto_pair:
+                    _sra_auto_pair = _sra_df[[_sra_pre_suggest, _sra_post_suggest]].apply(pd.to_numeric, errors="coerce").dropna()
+                    if len(_sra_auto_pair) >= 2:
+                        _sra_pre_vals = _sra_auto_pair[_sra_pre_suggest].astype(float)
+                        _sra_post_vals = _sra_auto_pair[_sra_post_suggest].astype(float)
+                        _sra_gain = _sra_post_vals - _sra_pre_vals
+                        _sra_npair = len(_sra_gain)
+                        _sra_pair_mean = float(_sra_gain.mean())
+                        _sra_pair_sd = float(_sra_gain.std(ddof=1))
+                        _sra_pair_se = _sra_pair_sd / np.sqrt(_sra_npair) if _sra_npair > 0 else np.nan
+                        _sra_pair_df = _sra_npair - 1
+                        _sra_pair_t, _sra_pair_p = ttest_rel(_sra_post_vals, _sra_pre_vals, nan_policy="omit")
+                        _sra_pair_crit = float(t_dist.ppf(0.975, _sra_pair_df)) if _sra_pair_df > 0 else np.nan
+                        _sra_pair_ci_low = _sra_pair_mean - _sra_pair_crit * _sra_pair_se if np.isfinite(_sra_pair_crit) and np.isfinite(_sra_pair_se) else np.nan
+                        _sra_pair_ci_high = _sra_pair_mean + _sra_pair_crit * _sra_pair_se if np.isfinite(_sra_pair_crit) and np.isfinite(_sra_pair_se) else np.nan
+                        _sra_pair_dz = _sra_pair_mean / _sra_pair_sd if _sra_pair_sd > 0 else np.nan
+                        _sra_results.append({"Analysis": "Paired-samples t-test (post − pre)", "Outcome": f"{_sra_pre_suggest} → {_sra_post_suggest}", "Paired n": _sra_npair, "Pre mean": float(_sra_pre_vals.mean()), "Post mean": float(_sra_post_vals.mean()), "Mean change (post − pre)": _sra_pair_mean, "95% CI lower": _sra_pair_ci_low, "95% CI upper": _sra_pair_ci_high, "Statistic (t)": float(_sra_pair_t), "df": _sra_pair_df, "p-value": float(_sra_pair_p), "Effect size (Cohen dz)": _sra_pair_dz, "Effect direction": "Increase" if _sra_pair_mean > 0 else ("Decrease" if _sra_pair_mean < 0 else "No mean change")})
+                        _sra_m1, _sra_m2, _sra_m3, _sra_m4 = st.columns(4)
+                        _sra_m1.metric("Paired n", f"{_sra_npair}")
+                        _sra_m2.metric("Mean change", f"{_sra_pair_mean:.3f}")
+                        _sra_m3.metric("p-value", f"{_sra_pair_p:.5g}")
+                        _sra_m4.metric("Cohen's dz", f"{_sra_pair_dz:.3f}" if np.isfinite(_sra_pair_dz) else "N/A")
+                        st.write(f"**95% CI for mean change:** [{_sra_pair_ci_low:.3f}, {_sra_pair_ci_high:.3f}] · **t** = {_sra_pair_t:.4f}, **df** = {_sra_pair_df}")
+                        try:
+                            from scipy.stats import shapiro as _sra_shapiro
+                            if 3 <= _sra_npair <= 5000:
+                                _sra_sw, _sra_sp = _sra_shapiro(_sra_gain)
+                                st.caption(f"Normality screening of paired differences (Shapiro–Wilk): W = {_sra_sw:.4f}, p = {_sra_sp:.5g}. Treat this as a diagnostic, not an automatic test-selection rule.")
+                        except Exception:
+                            pass
+                        st.caption("Primary estimate is post − pre. The confidence interval and Cohen's dz describe the within-participant change; review the difference distribution and study design before reporting.")
+
+                        # If a two-level group variable exists, compare change scores between groups.
+                        _sra_group_candidates = [c for c in _sra_cat if _sra_df[c].dropna().nunique() == 2]
+                        if _sra_group_candidates:
+                            _sra_gain_group = st.selectbox("Optional: compare change between two independent groups", _sra_group_candidates, key="sra_auto_gain_group")
+                            _sra_gain_frame = _sra_df[[_sra_pre_suggest, _sra_post_suggest, _sra_gain_group]].copy()
+                            _sra_gain_frame["_gain"] = pd.to_numeric(_sra_gain_frame[_sra_post_suggest], errors="coerce") - pd.to_numeric(_sra_gain_frame[_sra_pre_suggest], errors="coerce")
+                            _sra_gain_frame = _sra_gain_frame.dropna(subset=["_gain", _sra_gain_group])
+                            _sra_levels = _sra_gain_frame[_sra_gain_group].dropna().unique().tolist()
+                            if len(_sra_levels) == 2:
+                                _sra_ga = _sra_gain_frame.loc[_sra_gain_frame[_sra_gain_group] == _sra_levels[0], "_gain"].astype(float)
+                                _sra_gb = _sra_gain_frame.loc[_sra_gain_frame[_sra_gain_group] == _sra_levels[1], "_gain"].astype(float)
+                                if min(len(_sra_ga), len(_sra_gb)) >= 2:
+                                    _sra_gt, _sra_gp = ttest_ind(_sra_ga, _sra_gb, equal_var=False)
+                                    _sra_gv1, _sra_gv2 = _sra_ga.var(ddof=1), _sra_gb.var(ddof=1)
+                                    _sra_gse2 = _sra_gv1/len(_sra_ga) + _sra_gv2/len(_sra_gb)
+                                    _sra_gdf_den = (_sra_gv1/len(_sra_ga))**2/(len(_sra_ga)-1) + (_sra_gv2/len(_sra_gb))**2/(len(_sra_gb)-1)
+                                    _sra_gdf = _sra_gse2**2/_sra_gdf_den if _sra_gdf_den > 0 else np.nan
+                                    _sra_gdiff = float(_sra_ga.mean() - _sra_gb.mean())
+                                    _sra_gcrit = float(t_dist.ppf(0.975, _sra_gdf)) if np.isfinite(_sra_gdf) else np.nan
+                                    _sra_gci_l = _sra_gdiff - _sra_gcrit*np.sqrt(_sra_gse2) if np.isfinite(_sra_gcrit) else np.nan
+                                    _sra_gci_u = _sra_gdiff + _sra_gcrit*np.sqrt(_sra_gse2) if np.isfinite(_sra_gcrit) else np.nan
+                                    _sra_gpool = np.sqrt(((len(_sra_ga)-1)*_sra_gv1 + (len(_sra_gb)-1)*_sra_gv2)/(len(_sra_ga)+len(_sra_gb)-2))
+                                    _sra_gd = _sra_gdiff/_sra_gpool if _sra_gpool > 0 else np.nan
+                                    _sra_results.append({"Analysis": "Welch independent t-test on change scores", "Outcome": "Post − pre change", "Grouping": _sra_gain_group, "Group 1": str(_sra_levels[0]), "n1": len(_sra_ga), "Mean change 1": float(_sra_ga.mean()), "Group 2": str(_sra_levels[1]), "n2": len(_sra_gb), "Mean change 2": float(_sra_gb.mean()), "Mean difference in change": _sra_gdiff, "95% CI lower": _sra_gci_l, "95% CI upper": _sra_gci_u, "Statistic (t)": float(_sra_gt), "df": _sra_gdf, "p-value": float(_sra_gp), "Effect size (Cohen d)": _sra_gd})
+                                    st.write(f"**Between-group comparison of change scores:** { _sra_levels[0] } vs { _sra_levels[1] } · t = {_sra_gt:.4f}, df = {_sra_gdf:.3f}, p = {_sra_gp:.5g}, mean difference = {_sra_gdiff:.3f}, 95% CI [{_sra_gci_l:.3f}, {_sra_gci_u:.3f}]")
+                    else:
+                        st.warning("Fewer than two complete paired observations are available.")
+            else:
+                st.info("No recognizable pre/post pair was detected by column name. Select the study design and variables manually below.")
+
+        with st.expander("5 · Guided statistical analysis", expanded=True):
+            st.caption("Choose the study design explicitly. Column names may suggest a design but do not prove pairing, randomization, or causality.")
+            _sra_design_options = ["Independent groups", "Paired measurements", "One-sample comparison", "Association / correlation", "Prediction / regression"]
+            _sra_default_design = 1 if _sra_pair_tokens_found else 0
+            _sra_design = st.selectbox("Study design", _sra_design_options, index=_sra_default_design, key="sra_design")
             _sra_alpha = st.selectbox("Significance level (α)", [0.01, 0.05, 0.10], index=1, key="sra_alpha")
             if _sra_design == "Independent groups":
                 if _sra_num and _sra_cat:
@@ -1338,19 +1413,27 @@ elif page == "Smart Research Analyzer":
             elif _sra_design == "Paired measurements":
                 if len(_sra_num) >= 2:
                     _sra_p1, _sra_p2 = st.columns(2)
-                    _sra_before = _sra_p1.selectbox("Measurement 1", _sra_num, key="sra_pair_1")
-                    _sra_after = _sra_p2.selectbox("Measurement 2", [c for c in _sra_num if c != _sra_before], key="sra_pair_2")
+                    _sra_before_default = _sra_pair_suggestion[0] if _sra_pair_tokens_found else _sra_num[0]
+                    _sra_after_default = _sra_pair_suggestion[1] if _sra_pair_tokens_found else next(c for c in _sra_num if c != _sra_before_default)
+                    _sra_before = _sra_p1.selectbox("Measurement 1 (pre / baseline)", _sra_num, index=_sra_num.index(_sra_before_default), key="sra_pair_1")
+                    _sra_after = _sra_p2.selectbox("Measurement 2 (post / follow-up)", [c for c in _sra_num if c != _sra_before], index=([c for c in _sra_num if c != _sra_before].index(_sra_after_default) if _sra_after_default in [c for c in _sra_num if c != _sra_before] else 0), key="sra_pair_2")
                     _sra_pair = _sra_df[[_sra_before, _sra_after]].apply(pd.to_numeric, errors="coerce").dropna()
                     st.checkbox("I confirm these two columns are measured on the same units / participants", key="sra_pair_confirm")
                     if st.session_state.get("sra_pair_confirm", False):
                         if len(_sra_pair) >= 2:
                             _sra_test = st.radio("Paired test", ["Paired t-test", "Wilcoxon signed-rank"], horizontal=True, key="sra_pair_test")
-                            _sra_diff = _sra_pair[_sra_before] - _sra_pair[_sra_after]
-                            _sra_stat, _sra_p = ttest_rel(_sra_pair[_sra_before], _sra_pair[_sra_after]) if _sra_test == "Paired t-test" else wilcoxon(_sra_pair[_sra_before], _sra_pair[_sra_after])
+                            _sra_diff = _sra_pair[_sra_after] - _sra_pair[_sra_before]
+                            _sra_stat, _sra_p = ttest_rel(_sra_pair[_sra_after], _sra_pair[_sra_before]) if _sra_test == "Paired t-test" else wilcoxon(_sra_pair[_sra_after], _sra_pair[_sra_before])
                             _sra_dz = _sra_diff.mean()/ _sra_diff.std(ddof=1) if _sra_diff.std(ddof=1) else np.nan
-                            _sra_results.append({"Analysis": _sra_test, "Measurement 1": _sra_before, "Measurement 2": _sra_after, "Paired n": len(_sra_pair), "Mean difference": _sra_diff.mean(), "Statistic": _sra_stat, "p-value": _sra_p, "Cohen dz": _sra_dz})
+                            _sra_pair_df_guided = len(_sra_pair)-1 if _sra_test == "Paired t-test" else np.nan
+                            _sra_pair_se_guided = _sra_diff.std(ddof=1)/np.sqrt(len(_sra_pair)) if len(_sra_pair)>1 else np.nan
+                            _sra_pair_crit_guided = float(t_dist.ppf(0.975, _sra_pair_df_guided)) if _sra_test == "Paired t-test" else np.nan
+                            _sra_ci_l_guided = _sra_diff.mean()-_sra_pair_crit_guided*_sra_pair_se_guided if np.isfinite(_sra_pair_crit_guided) else np.nan
+                            _sra_ci_u_guided = _sra_diff.mean()+_sra_pair_crit_guided*_sra_pair_se_guided if np.isfinite(_sra_pair_crit_guided) else np.nan
+                            _sra_results.append({"Analysis": _sra_test, "Measurement 1": _sra_before, "Measurement 2": _sra_after, "Paired n": len(_sra_pair), "Mean change (post − pre)": _sra_diff.mean(), "95% CI lower": _sra_ci_l_guided, "95% CI upper": _sra_ci_u_guided, "Statistic (t or W)": _sra_stat, "df": _sra_pair_df_guided, "p-value": _sra_p, "Effect size (Cohen dz)": _sra_dz})
                             st.metric("p-value", f"{_sra_p:.5g}")
-                            st.write(f"Paired n = {len(_sra_pair)} · Mean difference = {_sra_diff.mean():.4g} · Cohen's dz = {_sra_dz:.3f}" if np.isfinite(_sra_dz) else f"Paired n = {len(_sra_pair)} · Mean difference = {_sra_diff.mean():.4g}")
+                            st.write(f"Paired n = {len(_sra_pair)} · Mean change (post − pre) = {_sra_diff.mean():.4g} · Cohen's dz = {_sra_dz:.3f}" if np.isfinite(_sra_dz) else f"Paired n = {len(_sra_pair)} · Mean change (post − pre) = {_sra_diff.mean():.4g}")
+                            if _sra_test == "Paired t-test": st.write(f"t = {_sra_stat:.4f}; df = {_sra_pair_df_guided}; 95% CI = [{_sra_ci_l_guided:.4g}, {_sra_ci_u_guided:.4g}]")
                         else:
                             st.warning("At least two complete pairs are required.")
                     else:
