@@ -1,7 +1,12 @@
-# STATNOVA v3 — Intelligent Research Analytics
+# STATNOVA app_v6 — Bilingual Statistical Interpretation + Complete Analysis Records
+# Global report exports: PDF, DOCX, XLSX, CSV and optional SPSS SAV.
+# Built as an additive upgrade from app_v6.py; original v6 remains unchanged.
 # Development build: validate statistical choices and outputs before research use.
 
 import io
+import re
+import json
+import hashlib
 from datetime import datetime
 from itertools import combinations
 
@@ -11,7 +16,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from scipy.stats import (
     ttest_ind, ttest_rel, ttest_1samp, f_oneway, mannwhitneyu,
-    wilcoxon, kruskal, chi2_contingency, pearsonr, spearmanr, kendalltau, studentized_range
+    wilcoxon, kruskal, chi2_contingency, pearsonr, spearmanr, kendalltau, studentized_range, linregress, t as t_dist
 )
 from statsmodels.stats.oneway import anova_oneway
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
@@ -22,7 +27,7 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
 st.set_page_config(
-    page_title="STATNOVA | Intelligent Research Analytics",
+    page_title="STATNOVA V11 | Smart Research Analytics",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -81,7 +86,7 @@ with st.sidebar:
         "Workspace",
         ["Home", "User Guide", "Upload & Explore", "Data Quality", "Descriptive Statistics",
          "Statistical Tests", "Relationships & Regression", "Visualizations",
-         "Reports & Export", "About"]
+         "Results Interpretation", "Reports & Export", "Smart Research Analyzer", "About"]
     )
     st.divider()
     st.markdown("<div style='text-align:center;color:#0a4e82;font-weight:800'>Amatalelah</div><div style='text-align:center;color:#5680a2;font-size:.72rem'>PLATFORM DEVELOPER</div>", unsafe_allow_html=True)
@@ -117,10 +122,99 @@ def p_text(p):
         return "N/A"
     return f"{p:.5g}" if np.isfinite(p) else "N/A"
 
+def interpret_statistical_result(title, statistic, pvalue, alpha=0.05, note="", n=None):
+    """Create method-aware bilingual interpretation without inventing uncomputed estimates."""
+    name = str(title)
+    low = name.lower()
+    method = "Pearson" if "pearson" in low else "Spearman" if "spearman" in low else "Kendall" if "kendall" in low else None
+    stat = float(statistic) if statistic is not None and np.isfinite(statistic) else None
+    p = float(pvalue) if pvalue is not None and np.isfinite(pvalue) else None
+    alpha = float(alpha)
+    # Give every supported procedure its actual statistic name instead of the
+    # ambiguous generic label "Test statistic".
+    title_key = re.sub(r"[^a-z0-9]+", " ", low).strip()
+    if method:
+        label = {"Pearson": "Pearson correlation coefficient (r)",
+                 "Spearman": "Spearman rank correlation coefficient (ρ)",
+                 "Kendall": "Kendall rank correlation coefficient (τ)"}[method]
+    elif "chi square" in title_key or "chi-square" in low or "chi2" in low:
+        label = "Chi-square statistic (χ²)"
+    elif "kruskal" in title_key:
+        label = "Kruskal–Wallis H statistic"
+    elif "mann whitney" in title_key or "mann-whitney" in low:
+        label = "Mann–Whitney U statistic"
+    elif "wilcoxon" in title_key:
+        label = "Wilcoxon signed-rank statistic (W)"
+    elif "anova" in title_key or "analysis of variance" in title_key:
+        label = "F statistic"
+    elif "t-test" in title_key or "t test" in title_key or "student" in title_key:
+        label = "t statistic"
+    elif "z-test" in title_key or "z test" in title_key:
+        label = "Z statistic"
+    elif "regression" in title_key:
+        label = "Regression slope coefficient (β₁)"
+    else:
+        label = "Test statistic (procedure-specific label unavailable)"
+    if method and stat is not None:
+        magnitude = abs(stat)
+        if method == "Kendall":
+            strength = "very weak" if magnitude < .10 else "weak" if magnitude < .30 else "moderate" if magnitude < .50 else "strong"
+            strength_ar = "ضعيف جدًا" if magnitude < .10 else "ضعيف" if magnitude < .30 else "متوسط" if magnitude < .50 else "قوي"
+        else:
+            strength = "negligible" if magnitude < .10 else "very weak" if magnitude < .20 else "weak" if magnitude < .40 else "moderate" if magnitude < .60 else "strong" if magnitude < .80 else "very strong"
+            strength_ar = "تكاد تكون معدومة" if magnitude < .10 else "ضعيفة جدًا" if magnitude < .20 else "ضعيفة" if magnitude < .40 else "متوسطة" if magnitude < .60 else "قوية" if magnitude < .80 else "قوية جدًا"
+        direction = "positive" if stat > 0 else "negative" if stat < 0 else "approximately zero"
+        direction_ar = "طردية" if stat > 0 else "عكسية" if stat < 0 else "قريبة من الصفر"
+        sample = f" The analysis used {n} complete paired observations." if n is not None else ""
+        sample_ar = f" وقد استند التحليل إلى {n} أزواج مكتملة من المشاهدات." if n is not None else ""
+        if p is None:
+            en = f"The {method} coefficient (" + ("r" if method == "Pearson" else "ρ" if method == "Spearman" else "τ") + f" = {stat:.4g}) indicates a {strength} {direction} association. A valid p-value is unavailable, so statistical significance cannot be determined. Correlation does not establish causation." + sample
+            ar = f"يشير معامل {method} ({label.split('(')[-1].rstrip(')')} = {stat:.4g}) إلى علاقة {direction_ar} {strength_ar}. قيمة p غير متاحة، لذلك لا يمكن تحديد الدلالة الإحصائية. الارتباط لا يثبت السببية." + sample_ar
+            decision = "Not assessed — p-value unavailable"; decision_ar = "لم تُحدد — قيمة p غير متاحة"
+        else:
+            significant = p < alpha
+            decision = "Statistically significant" if significant else "Not statistically significant"
+            decision_ar = "دالة إحصائيًا" if significant else "غير دالة إحصائيًا"
+            tail = (f"The association is statistically significant at α = {alpha:g}." if significant else f"The association is not statistically significant at α = {alpha:g}; this does not prove that no association exists.")
+            tail_ar = (f"العلاقة دالة إحصائيًا عند مستوى الدلالة α = {alpha:g}." if significant else f"العلاقة غير دالة إحصائيًا عند مستوى الدلالة α = {alpha:g}؛ ولا يثبت ذلك انعدام العلاقة.")
+            en = f"The {method} coefficient (" + ("r" if method == "Pearson" else "ρ" if method == "Spearman" else "τ") + f" = {stat:.4g}) indicates a {strength} {direction} association between the selected variables. The p-value is {p:.5g} (α = {alpha:g}); {tail} The coefficient describes association, not causation." + sample
+            ar = f"يشير معامل {method} (" + ("r" if method == "Pearson" else "ρ" if method == "Spearman" else "τ") + f" = {stat:.4g}) إلى علاقة {direction_ar} {strength_ar} بين المتغيرين المحددين. بلغت قيمة p = {p:.5g} عند α = {alpha:g}؛ {tail_ar} ويصف معامل الارتباط العلاقة ولا يثبت السببية." + sample_ar
+        academic_en = f"A {method} correlation analysis observed a {strength} {direction} association (coefficient = {stat:.4g}, p = {p:.5g}; n = {n if n is not None else 'not recorded'}). Statistical significance: {decision.lower()}." if p is not None else en
+        academic_ar = f"لوحظ في تحليل ارتباط {method} معامل يشير إلى علاقة {direction_ar} {strength_ar} (المعامل = {stat:.4g}، p = {p:.5g}؛ n = {n if n is not None else 'غير مسجل'}). القرار الإحصائي: {decision_ar}." if p is not None else ar
+    elif p is not None:
+        significant = p < alpha
+        decision = "Statistically significant" if significant else "Not statistically significant"
+        decision_ar = "دالة إحصائيًا" if significant else "غير دالة إحصائيًا"
+        en = f"The {name} produced p = {p:.5g} (α = {alpha:g}). The result is {decision.lower()}. Statistical significance alone does not establish practical importance or causality; interpret it alongside the effect estimate, assumptions, and study design."
+        ar = f"أظهر اختبار {name} قيمة p = {p:.5g} عند α = {alpha:g}، وكانت النتيجة {decision_ar}. لا تكفي الدلالة الإحصائية وحدها لإثبات الأهمية العملية أو السببية؛ بل يجب تفسيرها مع حجم الأثر والافتراضات وتصميم الدراسة."
+        academic_en, academic_ar = en, ar
+    else:
+        decision, decision_ar = "Not assessed", "لم تُحدد"
+        en = f"The {name} was recorded, but a valid p-value is unavailable. No significance conclusion can be made. Review the data and test assumptions."
+        ar = f"تم تسجيل اختبار {name}، لكن قيمة p غير متاحة؛ لذلك لا يمكن إصدار حكم بشأن الدلالة الإحصائية. ينبغي مراجعة البيانات وافتراضات الاختبار."
+        academic_en, academic_ar = en, ar
+    return {"statistic_label": label, "decision": decision, "decision_ar": decision_ar,
+            "interpretation_en": en, "interpretation_ar": ar,
+            "academic_statement_en": academic_en, "academic_statement_ar": academic_ar}
+
+
 def result_card(title, statistic, pvalue, alpha=0.05, note=""):
+    _n_match = re.search(r"(?:observations|pairs|sample size|n)\s*[:=]\s*(\d+)", str(note), re.I)
+    _n = int(_n_match.group(1)) if _n_match else None
+    _interpretation = interpret_statistical_result(title, statistic, pvalue, alpha, note, _n)
+    record = {
+        "title": str(title), "statistic": float(statistic) if np.isfinite(statistic) else None,
+        "statistic_label": _interpretation["statistic_label"], "pvalue": float(pvalue) if pvalue is not None and np.isfinite(pvalue) else None,
+        "alpha": float(alpha), "note": str(note), "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        **_interpretation
+    }
+    st.session_state.last_result = record
+    if "analysis_results" not in st.session_state:
+        st.session_state.analysis_results = []
+    st.session_state.analysis_results.append(record.copy())
     st.subheader(title)
     c1, c2, c3 = st.columns(3)
-    c1.metric("Test statistic", f"{statistic:.5g}" if np.isfinite(statistic) else "N/A")
+    c1.metric(record.get("statistic_label", "Test statistic"), f"{statistic:.5g}" if np.isfinite(statistic) else "N/A")
     c2.metric("p-value", p_text(pvalue))
     c3.metric("Significance level (α)", f"{alpha:.3f}")
     if np.isfinite(pvalue):
@@ -130,6 +224,35 @@ def result_card(title, statistic, pvalue, alpha=0.05, note=""):
             st.info(f"Not statistically significant at α = {alpha:.3f}.")
     if note:
         st.caption(note)
+    with st.expander("Scientific interpretation | التفسير العلمي", expanded=True):
+        st.markdown("**English**")
+        st.write(record["interpretation_en"])
+        st.markdown("**العربية**")
+        st.write(record["interpretation_ar"])
+        st.markdown("**Academic wording | صياغة أكاديمية**")
+        st.write(record["academic_statement_en"])
+        st.write(record["academic_statement_ar"])
+    # Individual export for this completed test
+    try:
+        from docx import Document as _OneDoc
+        _d = _OneDoc(); _d.add_heading(f"STATNOVA — {title}", 0)
+        _d.add_paragraph(f"Statistical measure: {record.get('statistic_label', 'Test statistic')}")
+        for _k, _v in record.items():
+            if _k not in {"interpretation_en", "interpretation_ar", "academic_statement_en", "academic_statement_ar", "statistic_label"}:
+                _d.add_paragraph(f"{_k}: {_v}")
+        _d.add_heading("Scientific interpretation", level=1)
+        _d.add_paragraph("English: " + record["interpretation_en"])
+        _d.add_paragraph("العربية: " + record["interpretation_ar"])
+        _d.add_heading("Academic wording", level=1)
+        _d.add_paragraph(record["academic_statement_en"])
+        _d.add_paragraph(record["academic_statement_ar"])
+        _b = io.BytesIO(); _d.save(_b)
+        _c1, _c2 = st.columns(2)
+        _c1.download_button("Download this test — Word", _b.getvalue(), f"{safe_filename(title)}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"individual_docx_{len(st.session_state.analysis_results)}")
+        _pdf = build_pdf_report(st.session_state.data, st.session_state.source_name, record)
+        _c2.download_button("Download this test — PDF", _pdf, f"{safe_filename(title)}.pdf", "application/pdf", key=f"individual_pdf_{len(st.session_state.analysis_results)}")
+    except Exception as _export_error:
+        st.caption(f"Individual report export unavailable: {_export_error}")
 
 def clean_numeric(series):
     return pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
@@ -174,8 +297,8 @@ def games_howell(groups, alpha=0.05):
 
 
 
-def build_pdf_report(df, source_name):
-    """Create a concise, reproducible dataset overview PDF."""
+def build_pdf_report(df, source_name, result=None):
+    """Create a paginated dataset and statistical-results PDF report."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=42, bottomMargin=42)
     styles = getSampleStyleSheet()
@@ -210,8 +333,24 @@ def build_pdf_report(df, source_name):
                                      ("GRID", (0,0), (-1,-1), .35, colors.grey),
                                      ("FONTSIZE", (0,0), (-1,-1), 7), ("PADDING", (0,0), (-1,-1), 4)]))
         story.append(summary)
+    if result:
+        story.extend([Spacer(1, 14), Paragraph("Statistical analysis performed", styles["Heading2"])])
+        result_rows = [["Field", "Value"]]
+        for key, value in result.items():
+            result_rows.append([str(key)[:55], str(value)[:180]])
+        result_table = Table(result_rows, repeatRows=1, colWidths=[145, 355])
+        result_table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.HexColor("#e7f0f3")), ("GRID", (0,0), (-1,-1), .35, colors.grey), ("FONTSIZE", (0,0), (-1,-1), 8), ("VALIGN", (0,0), (-1,-1), "TOP"), ("PADDING", (0,0), (-1,-1), 5)]))
+        story.append(result_table)
+        if isinstance(result, dict):
+            _pdf_interp = result.get("interpretation_en") or result.get("interpretation_ar")
+            if _pdf_interp:
+                story.extend([Spacer(1, 10), Paragraph("Scientific interpretation", styles["Heading2"])])
+                for _key, _heading in (("interpretation_en", "English"), ("interpretation_ar", "التفسير العربي"), ("academic_statement_en", "Academic wording"), ("academic_statement_ar", "الصياغة الأكاديمية")):
+                    if result.get(_key):
+                        story.append(Paragraph(f"<b>{_heading}:</b> {str(result[_key])}", styles["BodyText"]))
+                        story.append(Spacer(1, 5))
     story.extend([Spacer(1, 14), Paragraph("Interpretation note", styles["Heading2"]),
-                  Paragraph("This report summarizes the uploaded dataset only. It does not certify data quality, select a study design, or replace statistical review. Missing values and potential outliers have not been removed automatically.", styles["BodyText"])])
+                  Paragraph("This report includes only analyses recorded in this session. It does not certify data quality or replace scientific review. Missing values and potential outliers have not been removed automatically. Statistical significance alone does not establish practical importance or causality.", styles["BodyText"])])
     doc.build(story)
     buffer.seek(0)
     return buffer.getvalue()
@@ -225,6 +364,14 @@ if "data" not in st.session_state:
     st.session_state.data = None
 if "source_name" not in st.session_state:
     st.session_state.source_name = ""
+if "cleaned_data" not in st.session_state:
+    st.session_state.cleaned_data = None
+if "last_result" not in st.session_state:
+    st.session_state.last_result = None
+if "analysis_results" not in st.session_state:
+    st.session_state.analysis_results = []
+if "interpretation_language" not in st.session_state:
+    st.session_state.interpretation_language = "English + العربية"
 
 # ---------- Home ----------
 if page == "Home":
@@ -236,7 +383,7 @@ if page == "Home":
         "and exporting working reports."
     )
     a, b, c = st.columns(3)
-    a.metric("Analysis areas", "8")
+    a.metric("Analysis areas", "9")
     b.metric("Input formats", "CSV / Excel")
     c.metric("Interface", "English")
     st.subheader("Getting started")
@@ -279,7 +426,7 @@ elif page == "User Guide":
     فسّري قيمة الاختبار وp-value مع أحجام العينات والافتراضات وحجم الأثر وفترات الثقة والسياق العلمي. الدلالة الإحصائية وحدها لا تثبت الأهمية العملية أو السريرية.
 
     ### 6. Export | تصدير النتائج
-    Open **Reports & Export** to download the dataset, an Excel workbook, a text summary, or a PDF overview. Protect confidential or identifiable research data before uploading.
+    Open **Reports & Export** to download CSV, Excel, Word, PDF, and SPSS-compatible data exports. Protect confidential or identifiable research data before uploading.
 
     من صفحة **Reports & Export** يمكنك تنزيل البيانات أو ملف Excel أو ملخص نصي أو تقرير PDF. لا ترفعي بيانات شخصية أو سرية دون حماية مناسبة.
 
@@ -292,13 +439,23 @@ elif page == "Upload & Explore":
     uploaded = st.file_uploader("Upload a CSV or Excel dataset", type=["csv", "xlsx", "xls"])
     if uploaded is not None:
         try:
-            df_new = load_data(uploaded)
+            if uploaded.name.lower().endswith((".xlsx", ".xls")):
+                uploaded.seek(0)
+                workbook = pd.ExcelFile(uploaded)
+                sheet_name = st.selectbox("Choose Excel worksheet", workbook.sheet_names, key="excel_sheet_choice")
+                uploaded.seek(0)
+                df_new = pd.read_excel(uploaded, sheet_name=sheet_name)
+                source_label = f"{uploaded.name} · {sheet_name}"
+            else:
+                df_new = load_data(uploaded)
+                source_label = uploaded.name
             if df_new.empty:
                 st.error("The uploaded file contains no data rows.")
             else:
-                st.session_state.data = df_new
-                st.session_state.source_name = uploaded.name
-                st.success(f"Loaded successfully: {uploaded.name}")
+                st.session_state.data = df_new.copy()
+                st.session_state.cleaned_data = None
+                st.session_state.source_name = source_label
+                st.success(f"Loaded successfully: {source_label}")
         except Exception as exc:
             st.error(f"Could not read this file: {exc}")
 
@@ -355,6 +512,23 @@ elif page == "Data Quality":
                     st.dataframe(flagged.rename("Flagged value").to_frame(), use_container_width=True)
             else:
                 st.caption("At least four valid numeric observations are needed for this screening.")
+        st.divider()
+        st.subheader("Optional cleaning workspace | مساحة تنظيف آمنة")
+        st.caption("The uploaded original dataset is never changed. Cleaning creates a separate copy and requires your approval.")
+        clean_missing = st.checkbox("Create a copy with incomplete rows removed", value=False)
+        clean_duplicates = st.checkbox("Create a copy with duplicate rows removed", value=False)
+        if st.button("Prepare reviewed cleaning copy"):
+            cleaned = df.copy()
+            if clean_missing:
+                cleaned = cleaned.dropna()
+            if clean_duplicates:
+                cleaned = cleaned.drop_duplicates()
+            st.session_state.cleaned_data = cleaned
+            st.success(f"Separate cleaning copy prepared: {len(cleaned):,} rows. Original data remains unchanged.")
+        if st.session_state.cleaned_data is not None:
+            st.write("Cleaning-copy preview")
+            st.dataframe(st.session_state.cleaned_data.head(50), use_container_width=True)
+            st.download_button("Download cleaning copy (CSV)", st.session_state.cleaned_data.to_csv(index=False).encode("utf-8-sig"), "statnova_cleaned_copy.csv", "text/csv")
         st.warning("Missing values, duplicates, and IQR flags require context. STATNOVA does not delete observations automatically.")
 
 # ---------- Descriptive statistics ----------
@@ -671,7 +845,7 @@ elif page == "Relationships & Regression":
                         raise ValueError("Both variables must have variation; a constant variable cannot be correlated.")
                     funcs = {"Pearson": pearsonr, "Spearman": spearmanr, "Kendall": kendalltau}
                     r, p = funcs[method](pair[x], pair[y])
-                    result_card(f"{method} correlation", r, p, 0.05, f"Complete paired observations: {len(pair)}.")
+                    result_card(f"{method} correlation", r, p, 0.05, f"Variables: {x} and {y}; complete paired observations: {len(pair)}.")
                     st.caption("Correlation describes association, not causation.")
                 except Exception as exc:
                     st.error(f"Correlation could not be calculated: {exc}")
@@ -688,6 +862,16 @@ elif page == "Relationships & Regression":
                     model = LinearRegression().fit(pair[[x]], pair[y])
                     pred = model.predict(pair[[x]])
                     r2 = model.score(pair[[x]], pair[y])
+                    _lr = linregress(pair[x].to_numpy(dtype=float), pair[y].to_numpy(dtype=float))
+                    _df_reg = len(pair) - 2
+                    _tcrit = float(t_dist.ppf(0.975, _df_reg)) if _df_reg > 0 else float("nan")
+                    _slope_ci = (float(_lr.slope - _tcrit * _lr.stderr), float(_lr.slope + _tcrit * _lr.stderr)) if np.isfinite(_tcrit) and np.isfinite(_lr.stderr) else (float("nan"), float("nan"))
+                    _reg_note = (f"Outcome: {y}; predictor: {x}; intercept: {model.intercept_:.6g}; "
+                                 f"slope: {model.coef_[0]:.6g}; R: {_lr.rvalue:.6g}; R-squared: {r2:.6g}; "
+                                 f"slope standard error: {_lr.stderr:.6g}; slope 95% CI: [{_slope_ci[0]:.6g}, {_slope_ci[1]:.6g}]; n={len(pair)}")
+                    result_card("Simple linear regression", _lr.slope, _lr.pvalue, 0.05, _reg_note)
+                    st.session_state.last_result.update({"statistic_label": "Slope coefficient", "r": float(_lr.rvalue), "r_squared": float(r2), "intercept": float(_lr.intercept), "slope": float(_lr.slope), "slope_stderr": float(_lr.stderr), "slope_95ci_lower": _slope_ci[0], "slope_95ci_upper": _slope_ci[1], "n": int(len(pair))})
+                    st.session_state.analysis_results[-1].update(st.session_state.last_result)
                     c1, c2, c3 = st.columns(3)
                     c1.metric("R-squared", f"{r2:.5f}")
                     c2.metric("Intercept", f"{model.intercept_:.5g}")
@@ -765,6 +949,58 @@ elif page == "Visualizations":
                 except Exception as exc:
                     st.error(f"Chart could not be created: {exc}")
 
+# ---------- Results interpretation ----------
+elif page == "Results Interpretation":
+    st.title("Results Interpretation | تفسير النتائج")
+    st.caption("Evidence-linked explanations based on the latest calculated result. التفسير مبني على آخر نتيجة محسوبة داخل المنصة.")
+    lang = st.radio("Interpretation language | لغة التفسير", ["English + العربية", "English", "العربية"], horizontal=True, key="interpretation_language")
+    result = st.session_state.last_result
+    if not result:
+        st.info("Run a statistical test, correlation, or regression first. Then return here to review its interpretation. نفّذي تحليلًا أولًا ثم عودي إلى هذه الصفحة.")
+    else:
+        st.subheader(result["title"])
+        st.write("**Test statistic / الإحصاء:**", result.get("statistic", "N/A"))
+        st.write("**p-value:**", p_text(result.get("pvalue")))
+        st.write("**Significance level / مستوى الدلالة:**", result.get("alpha", 0.05))
+        if result.get("note"):
+            st.caption(result["note"])
+        pval = result.get("pvalue")
+        title_lower = result["title"].lower()
+        if pval is None:
+            en = "The coefficient of determination (R²) describes the proportion of observed outcome variability accounted for by this fitted model in this dataset. It does not establish causation or guarantee predictive performance on new data."
+            ar = "يمثل معامل التحديد (R²) نسبة التباين في المتغير الناتج التي يفسرها النموذج الملائم داخل هذه البيانات. ولا يثبت السببية ولا يضمن دقة التنبؤ على بيانات جديدة."
+        elif not np.isfinite(float(pval)):
+            en = "A valid p-value is unavailable or undefined, so statistical significance cannot be determined from this result. Review the data and test assumptions."
+            ar = "قيمة p غير متاحة أو غير معرّفة؛ لذلك لا يمكن تحديد الدلالة الإحصائية من هذه النتيجة. راجعي البيانات وافتراضات الاختبار."
+        elif "regression" in title_lower:
+            en = "The fitted linear regression estimates the expected change in the outcome for a one-unit increase in the predictor. Review the slope p-value and confidence interval alongside R-squared; the model does not establish causation and should be checked for linearity, residual behavior, independence, and influential observations."
+            ar = "يقدّر نموذج الانحدار الخطي التغير المتوقع في المتغير الناتج عند زيادة المتغير المتنبئ وحدة واحدة. تُراجع قيمة p للميل وفترة الثقة مع R²، ولا يثبت النموذج السببية. وينبغي فحص الخطية وسلوك البواقي والاستقلالية والقيم المؤثرة."
+        elif "correlation" in title_lower:
+            direction = "positive" if (result.get("statistic") or 0) > 0 else "negative" if (result.get("statistic") or 0) < 0 else "approximately zero"
+            en = f"The correlation coefficient indicates a {direction} association. Its magnitude describes the strength of the association for the selected method. Correlation does not demonstrate causation."
+            ar = f"يشير معامل الارتباط إلى علاقة {('طردية' if direction == 'positive' else 'عكسية' if direction == 'negative' else 'قريبة من الصفر')}. وتعبّر القيمة المطلقة للمعامل عن قوة الارتباط وفق الطريقة المختارة. الارتباط لا يثبت السببية."
+        else:
+            if pval < result.get("alpha", 0.05):
+                en = "The result is statistically significant at the selected alpha level. This is evidence against the test's null hypothesis under its assumptions; it does not by itself establish practical or clinical importance."
+                ar = "النتيجة دالة إحصائيًا عند مستوى الدلالة المختار. وهذا يقدم دليلًا ضد فرضية العدم وفق افتراضات الاختبار، لكنه لا يثبت وحده الأهمية العملية أو السريرية."
+            else:
+                en = "The result is not statistically significant at the selected alpha level. This does not prove that there is no effect or that groups are equivalent; consider the confidence interval, effect size, sample size, and assumptions."
+                ar = "النتيجة غير دالة إحصائيًا عند مستوى الدلالة المختار. وهذا لا يثبت انعدام الأثر أو تكافؤ المجموعات؛ ينبغي مراجعة فترة الثقة وحجم الأثر وحجم العينة والافتراضات."
+        en = result.get("interpretation_en", en)
+        ar = result.get("interpretation_ar", ar)
+        st.subheader("Statistical interpretation | التفسير الإحصائي")
+        if lang in ["English + العربية", "English"]:
+            st.write(en)
+        if lang in ["English + العربية", "العربية"]:
+            st.write(ar)
+        if result.get("academic_statement_en"):
+            st.subheader("Academic wording | الصياغة الأكاديمية")
+            st.write(result["academic_statement_en"])
+            st.write(result.get("academic_statement_ar", ""))
+        st.subheader("Scientific interpretation checklist | قائمة التفسير العلمي")
+        st.markdown("- Relate the finding to the research question and study design. / اربطي النتيجة بسؤال البحث وتصميم الدراسة.\n- Report effect size and confidence intervals when available. / أدرجي حجم الأثر وفترات الثقة عند توفرها.\n- Check assumptions, missing data, outliers, and sample size. / تحققي من الافتراضات والبيانات المفقودة والقيم المتطرفة وحجم العينة.\n- Avoid causal claims unless the design supports them. / تجنبي الاستنتاج السببي ما لم يسمح تصميم الدراسة بذلك.")
+        st.info("STATNOVA provides a structured statistical explanation, not an AI-verified scientific conclusion. Confirm the method and context before publication.")
+
 # ---------- Reports ----------
 elif page == "Reports & Export":
     st.title("Reports & Export")
@@ -782,8 +1018,19 @@ elif page == "Reports & Export":
         )
         excel = io.BytesIO()
         with pd.ExcelWriter(excel, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Data", index=False)
-            df.describe(include="all").transpose().to_excel(writer, sheet_name="Summary")
+            df.to_excel(writer, sheet_name="Original_Data", index=False)
+            (st.session_state.cleaned_data if st.session_state.cleaned_data is not None else df).to_excel(writer, sheet_name="Cleaned_Data", index=False)
+            quality_export = pd.DataFrame({"Column": df.columns.astype(str), "Data_Type": df.dtypes.astype(str).values, "Missing_Count": df.isna().sum().values, "Missing_Percent": (df.isna().mean().values * 100).round(3)})
+            quality_export.to_excel(writer, sheet_name="Data_Quality", index=False)
+            df.describe(include="all").transpose().to_excel(writer, sheet_name="Descriptive")
+            _saved_results = st.session_state.get("analysis_results", [])
+            last = st.session_state.last_result or {"Status": "No statistical result calculated in this session"}
+            result_df = pd.DataFrame(_saved_results if _saved_results else [last])
+            result_df.to_excel(writer, sheet_name="Statistical_Tests", index=False)
+            regression_df = result_df if "regression" in str(last.get("title", "")).lower() else pd.DataFrame([{"Status": "No regression model calculated in this session"}])
+            regression_df.to_excel(writer, sheet_name="Regression", index=False)
+            pd.DataFrame([{"Interpretation": "Review the Results Interpretation page. Interpret findings in the context of design, assumptions, effect size, and confidence intervals.", "Caution": "Statistical significance alone does not establish practical importance or causality."}]).to_excel(writer, sheet_name="Interpretation", index=False)
+            pd.DataFrame([{"Chart_Status": "Charts can be downloaded individually from the Visualizations page.", "Dataset_Rows": len(df), "Dataset_Columns": len(df.columns)}]).to_excel(writer, sheet_name="Charts", index=False)
         st.download_button(
             "Download Excel workbook", excel.getvalue(),
             "statnova_report.xlsx",
@@ -809,13 +1056,670 @@ elif page == "Reports & Export":
             "statnova_summary.txt", "text/plain"
         )
         try:
-            pdf_bytes = build_pdf_report(df, st.session_state.source_name)
+            from docx import Document as _DOCX_Document
+            from docx.enum.text import WD_ALIGN_PARAGRAPH as _DOCX_ALIGN
+            _doc = _DOCX_Document()
+            _doc.add_heading("STATNOVA — Complete Research Report", 0)
+            _doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            _doc.add_paragraph(f"Source: {st.session_state.source_name} | Rows: {len(df)} | Variables: {len(df.columns)}")
+            _doc.add_heading("Data quality", level=1)
+            _doc.add_paragraph(f"Duplicate rows: {int(df.duplicated().sum())}; missing cells: {int(df.isna().sum().sum())}")
+            from docx.enum.table import WD_TABLE_ALIGNMENT
+            from docx.shared import Inches, Pt
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn
+            def _add_docx_table(_document, _frame, _max_rows=120):
+                _frame = _frame.copy().reset_index()
+                if len(_frame) > _max_rows:
+                    _frame = _frame.head(_max_rows)
+                _table = _document.add_table(rows=1, cols=max(1, len(_frame.columns)))
+                _table.style = "Table Grid"
+                _table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                for _i, _col in enumerate(_frame.columns):
+                    _table.rows[0].cells[_i].text = str(_col)
+                for _, _record in _frame.iterrows():
+                    _cells = _table.add_row().cells
+                    for _i, _value in enumerate(_record.tolist()):
+                        if _i < len(_cells):
+                            _cells[_i].text = "" if pd.isna(_value) else str(_value)[:180]
+                for _row in _table.rows:
+                    for _cell in _row.cells:
+                        for _para in _cell.paragraphs:
+                            for _run in _para.runs:
+                                _run.font.size = Pt(8)
+                return _table
+            _doc.add_heading("Data quality and variable profile", level=1)
+            _quality_doc = pd.DataFrame({"Variable": df.columns.astype(str), "Data type": df.dtypes.astype(str).values,
+                "Missing n": df.isna().sum().values, "Missing %": (df.isna().mean().values*100).round(2)})
+            _add_docx_table(_doc, _quality_doc)
+            _doc.add_paragraph(f"Duplicate rows: {int(df.duplicated().sum())} | Missing cells: {int(df.isna().sum().sum())}")
+            _doc.add_heading("Descriptive statistics", level=1)
+            _desc_doc = df.describe(include="all").transpose().reset_index().rename(columns={"index":"Variable"})
+            _add_docx_table(_doc, _desc_doc)
+            _last_results = st.session_state.get("analysis_results", [])
+            _doc.add_heading("Statistical analyses performed", level=1)
+            if _last_results:
+                for _ri, _last in enumerate(_last_results, 1):
+                    _doc.add_heading(f"{_ri}. {_last.get('title','Statistical test')}", level=2)
+                    _result_doc = pd.DataFrame([{"Measure": str(_k), "Result": str(_v)} for _k, _v in _last.items() if _k != "title"])
+                    _add_docx_table(_doc, _result_doc)
+            else:
+                _doc.add_paragraph("No inferential test recorded in this session.")
+            _numeric_doc = df.select_dtypes(include=np.number)
+            if len(_numeric_doc.columns) > 1:
+                _doc.add_heading("Correlation matrix", level=1)
+                _corr_doc = _numeric_doc.corr().round(4).reset_index().rename(columns={"index":"Variable"})
+                _add_docx_table(_doc, _corr_doc)
+            _doc.add_heading("Interpretation and limitations", level=1)
+            _doc.add_paragraph("Interpret results in the context of study design, assumptions, effect size, confidence intervals, sample size and practical relevance. No unperformed analysis is represented as a result.")
+            _docx_buffer = io.BytesIO(); _doc.save(_docx_buffer)
+            st.download_button("Download complete Word report", _docx_buffer.getvalue(), "statnova_complete_report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="standard_docx_export")
+        except Exception as _docx_error:
+            st.warning(f"Word export unavailable: {_docx_error}")
+        _all_results = st.session_state.get("analysis_results", [])
+        st.subheader("All statistical tests performed")
+        if _all_results:
+            _results_frame = pd.DataFrame(_all_results)
+            st.dataframe(_results_frame, use_container_width=True)
+            _all_doc = _DOCX_Document()
+            _all_doc.add_heading("STATNOVA — Complete Statistical Analysis Report", 0)
+            _all_doc.add_paragraph(f"Source: {st.session_state.source_name} | Tests: {len(_all_results)} | Generated: {datetime.now():%Y-%m-%d %H:%M}")
+            for _i, _res in enumerate(_all_results, 1):
+                _all_doc.add_heading(f"{_i}. {_res.get('title','Statistical test')}", level=1)
+                for _k, _v in _res.items():
+                    if _k != "title": _all_doc.add_paragraph(f"{_k}: {_v}")
+            _all_doc_buf = io.BytesIO(); _all_doc.save(_all_doc_buf)
+            st.download_button("Download all tests — Word", _all_doc_buf.getvalue(), "statnova_all_tests.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="all_tests_docx")
+            _all_pdf = build_pdf_report(df, st.session_state.source_name, {f"Test {i+1} — {r.get('title','')}": str({k:v for k,v in r.items() if k != 'title'}) for i,r in enumerate(_all_results)})
+            st.download_button("Download all tests — PDF", _all_pdf, "statnova_all_tests.pdf", "application/pdf", key="all_tests_pdf")
+        else:
+            st.info("Run one or more statistical tests first; the complete report will collect them here.")
+
+        try:
+            import pyreadstat as _pyreadstat
+            _sav_buffer = io.BytesIO()
+            _pyreadstat.write_sav(df, _sav_buffer)
+            st.download_button("Download SPSS data (.sav)", _sav_buffer.getvalue(), "statnova_data.sav", "application/octet-stream", key="standard_sav_export")
+        except Exception:
+            st.caption("SPSS .sav export becomes available after installing pyreadstat from requirements.txt. CSV and Excel remain available meanwhile.")
+        try:
+            _saved_results = st.session_state.get("analysis_results", [])
+            _pdf_result_payload = ({f"Test {i+1} — {r.get('title','')}": str({k:v for k,v in r.items() if k != 'title'}) for i,r in enumerate(_saved_results)} if _saved_results else st.session_state.last_result)
+            pdf_bytes = build_pdf_report(df, st.session_state.source_name, _pdf_result_payload)
             st.download_button(
                 "Download PDF report", pdf_bytes,
                 "statnova_research_summary.pdf", "application/pdf"
             )
         except Exception as exc:
             st.error(f"PDF report could not be generated: {exc}")
+
+# ---------- Smart Research Analyzer (additive module) ----------
+elif page == "Smart Research Analyzer":
+    st.title("Smart Research Analyzer")
+    st.caption("Upload → inspect → review quality → analyze → interpret → export")
+    st.info("This module creates a separate analysis workspace. It does not alter your original uploaded file or the existing STATNOVA pages.")
+
+    _sra_file = st.file_uploader("Upload CSV or Excel workbook", type=["csv", "xlsx", "xls"], key="sra_upload")
+    _sra_df = None
+    _sra_source = ""
+    if _sra_file is not None:
+        _sra_source = _sra_file.name
+        try:
+            if _sra_file.name.lower().endswith(".csv"):
+                try:
+                    _sra_df = pd.read_csv(_sra_file)
+                except UnicodeDecodeError:
+                    _sra_file.seek(0)
+                    _sra_df = pd.read_csv(_sra_file, encoding="latin-1")
+            else:
+                _sra_file.seek(0)
+                _sra_book = pd.ExcelFile(_sra_file)
+                _sra_sheet = st.selectbox("Choose worksheet", _sra_book.sheet_names, key="sra_sheet")
+                _sra_df = pd.read_excel(_sra_book, sheet_name=_sra_sheet)
+            if _sra_df is None or _sra_df.empty:
+                st.error("The selected file or worksheet contains no data rows.")
+                _sra_df = None
+        except Exception as _sra_exc:
+            st.error(f"Could not read this file: {_sra_exc}")
+            _sra_df = None
+
+    if _sra_df is not None:
+        _sra_df.columns = [str(c) for c in _sra_df.columns]
+        st.session_state["sra_df"] = _sra_df.copy()
+        st.session_state["sra_source"] = _sra_source
+    elif st.session_state.get("sra_df") is not None:
+        _sra_df = st.session_state["sra_df"].copy()
+        _sra_source = st.session_state.get("sra_source", "Uploaded dataset")
+
+    if _sra_df is None:
+        st.markdown("#### Start a new analysis")
+        st.write("Upload a CSV file or an Excel workbook. For workbooks with multiple sheets, choose the sheet you want to analyze.")
+    else:
+        # V9: exclude identifier-like columns from inferential variable selectors.
+        _sra_id_pattern = re.compile(r"(^|[ _-])(id|identifier|code|record|subject|participant|patient|case|serial|number|no)([ _-]|$)", re.I)
+        _sra_id_candidates = [
+            c for c in _sra_df.columns
+            if _sra_id_pattern.search(str(c).strip())
+            or re.search(r"(id|code|record|subject|participant|patient|case|serial|number|no)$", str(c).strip(), re.I)
+        ]
+        _sra_num_all = _sra_df.select_dtypes(include=np.number).columns.tolist()
+        _sra_num = [c for c in _sra_num_all if c not in _sra_id_candidates]
+        _sra_cat = [c for c in _sra_df.columns if c not in _sra_num and c not in _sra_id_candidates]
+        if _sra_id_candidates:
+            st.info("Identifier-like columns excluded from statistical variable selectors: " + ", ".join(map(str, _sra_id_candidates)) + ". They remain in the original dataset and preview. | تم استبعاد أعمدة المعرّفات من قوائم المتغيرات الإحصائية، مع بقائها في البيانات الأصلية والمعاينة.")
+        _sra_miss = int(_sra_df.isna().sum().sum())
+        _sra_dup = int(_sra_df.duplicated().sum())
+        _sra_a, _sra_b, _sra_c, _sra_d = st.columns(4)
+        _sra_a.metric("Rows", f"{len(_sra_df):,}")
+        _sra_b.metric("Variables", f"{len(_sra_df.columns):,}")
+        _sra_c.metric("Missing cells", f"{_sra_miss:,}")
+        _sra_d.metric("Duplicate rows", f"{_sra_dup:,}")
+
+        with st.expander("1 · Dataset preview and variable roles", expanded=True):
+            st.write(f"**Source:** {_sra_source}")
+            st.dataframe(_sra_df.head(30), use_container_width=True)
+            _sra_profile = pd.DataFrame({
+                "Variable": _sra_df.columns,
+                "Data type": [_sra_df[c].dtype.name for c in _sra_df.columns],
+                "Role suggestion": ["Numeric" if c in _sra_num else ("Possible ID" if c in _sra_id_candidates else "Categorical / text") for c in _sra_df.columns],
+                "Missing n": [_sra_df[c].isna().sum() for c in _sra_df.columns],
+                "Missing %": [round(_sra_df[c].isna().mean()*100, 2) for c in _sra_df.columns],
+                "Unique values": [_sra_df[c].nunique(dropna=True) for c in _sra_df.columns]
+            })
+            st.dataframe(_sra_profile, use_container_width=True, hide_index=True)
+            if _sra_id_candidates:
+                st.caption("Possible identifier columns (review manually): " + ", ".join(_sra_id_candidates))
+            st.caption("Variable roles are suggestions only. Confirm whether coded numbers represent categories, IDs, or measurements.")
+
+        with st.expander("2 · Data quality screening", expanded=True):
+            _sra_quality = _sra_profile.copy()
+            st.dataframe(_sra_quality, use_container_width=True, hide_index=True)
+            _sra_outlier_rows = []
+            for _sra_col in _sra_num:
+                _sra_x = pd.to_numeric(_sra_df[_sra_col], errors="coerce").dropna()
+                if len(_sra_x) >= 4:
+                    _sra_q1, _sra_q3 = _sra_x.quantile([0.25, 0.75])
+                    _sra_iqr = _sra_q3 - _sra_q1
+                    _sra_low, _sra_high = _sra_q1 - 1.5*_sra_iqr, _sra_q3 + 1.5*_sra_iqr
+                    _sra_nout = int(((_sra_x < _sra_low) | (_sra_x > _sra_high)).sum())
+                    _sra_outlier_rows.append({"Variable": _sra_col, "Potential outliers (IQR rule)": _sra_nout, "Lower fence": _sra_low, "Upper fence": _sra_high})
+            if _sra_outlier_rows:
+                st.write("Potential outliers (screening only; not errors by definition)")
+                st.dataframe(pd.DataFrame(_sra_outlier_rows), use_container_width=True, hide_index=True)
+            st.warning("No rows or values are automatically deleted, imputed, or changed. Investigate flagged values against the source records and study protocol.")
+
+        with st.expander("3 · Descriptive statistics", expanded=True):
+            if _sra_num:
+                st.dataframe(_sra_df[_sra_num].describe().T, use_container_width=True)
+            if _sra_cat:
+                _sra_catvar = st.selectbox("Categorical variable to summarize", _sra_cat, key="sra_cat_summary")
+                st.dataframe(_sra_df[_sra_catvar].value_counts(dropna=False).rename_axis("Category").reset_index(name="Count"), use_container_width=True, hide_index=True)
+            if not _sra_num and not _sra_cat:
+                st.info("No analyzable columns were detected.")
+
+        _sra_results = []
+        if "sra_test_history" not in st.session_state:
+            st.session_state.sra_test_history = []
+        with st.expander("4 · Guided statistical analysis", expanded=True):
+            st.caption("Choose the study design explicitly. STATNOVA does not infer pairing, randomization, or causality from column names.")
+            _sra_design = st.selectbox("Study design", ["Independent groups", "Paired measurements", "One-sample comparison", "Association / correlation", "Prediction / regression"], key="sra_design")
+            _sra_alpha = st.selectbox("Significance level (α)", [0.01, 0.05, 0.10], index=1, key="sra_alpha")
+            if _sra_design == "Independent groups":
+                if _sra_num and _sra_cat:
+                    _sra_y = st.selectbox("Numeric outcome", _sra_num, key="sra_ind_y")
+                    _sra_g = st.selectbox("Independent grouping variable", _sra_cat, key="sra_ind_g")
+                    _sra_groups = _sra_df[_sra_g].dropna().unique().tolist()
+                    if len(_sra_groups) == 2:
+                        _sra_method = st.radio("Test", ["Welch independent t-test", "Mann–Whitney U"], horizontal=True, key="sra_ind_test")
+                        _sra_x1 = pd.to_numeric(_sra_df.loc[_sra_df[_sra_g] == _sra_groups[0], _sra_y], errors="coerce").dropna()
+                        _sra_x2 = pd.to_numeric(_sra_df.loc[_sra_df[_sra_g] == _sra_groups[1], _sra_y], errors="coerce").dropna()
+                        if min(len(_sra_x1), len(_sra_x2)) >= 2:
+                            if _sra_method == "Welch independent t-test":
+                                _sra_stat, _sra_p = ttest_ind(_sra_x1, _sra_x2, equal_var=False)
+                                _sra_sd = np.sqrt((np.var(_sra_x1, ddof=1)+np.var(_sra_x2, ddof=1))/2)
+                                _sra_eff = (np.mean(_sra_x1)-np.mean(_sra_x2))/_sra_sd if _sra_sd else np.nan
+                                _sra_effect_label = "Cohen's d (unweighted pooled SD)"
+                            else:
+                                _sra_stat, _sra_p = mannwhitneyu(_sra_x1, _sra_x2, alternative="two-sided")
+                                _sra_eff, _sra_effect_label = np.nan, "Effect size not calculated for this test"
+                            _sra_results.append({"Analysis": _sra_method, "Outcome": _sra_y, "Grouping": _sra_g, "Group 1": str(_sra_groups[0]), "n1": len(_sra_x1), "Mean 1": _sra_x1.mean(), "Group 2": str(_sra_groups[1]), "n2": len(_sra_x2), "Mean 2": _sra_x2.mean(), "Statistic": _sra_stat, "p-value": _sra_p, "Effect size": _sra_eff, "Effect metric": _sra_effect_label})
+                            st.write(f"**{_sra_method}** · {_sra_y} by {_sra_g}")
+                            st.metric("p-value", f"{_sra_p:.5g}")
+                            st.write(f"Statistic = {_sra_stat:.5g}; n₁ = {len(_sra_x1)}, n₂ = {len(_sra_x2)}")
+                            if np.isfinite(_sra_p):
+                                st.write("Statistically significant at the selected α." if _sra_p < _sra_alpha else "Not statistically significant at the selected α.")
+                            if np.isfinite(_sra_eff): st.write(f"{_sra_effect_label}: {_sra_eff:.3f}")
+                        else:
+                            st.warning("Each group needs at least two valid numeric observations for this comparison.")
+                    elif len(_sra_groups) > 2:
+                        _sra_method = st.radio("Test", ["One-way ANOVA", "Kruskal–Wallis"], horizontal=True, key="sra_many_test")
+                        _sra_samples = [pd.to_numeric(_sra_df.loc[_sra_df[_sra_g] == g, _sra_y], errors="coerce").dropna() for g in _sra_groups]
+                        _sra_samples = [x for x in _sra_samples if len(x) >= 2]
+                        if len(_sra_samples) >= 2:
+                            _sra_stat, _sra_p = f_oneway(*_sra_samples) if _sra_method == "One-way ANOVA" else kruskal(*_sra_samples)
+                            _sra_results.append({"Analysis": _sra_method, "Outcome": _sra_y, "Grouping": _sra_g, "Groups analyzed": len(_sra_samples), "Statistic": _sra_stat, "p-value": _sra_p})
+                            st.metric("p-value", f"{_sra_p:.5g}")
+                            st.write(f"{_sra_method}: statistic = {_sra_stat:.5g}; groups analyzed = {len(_sra_samples)}")
+                            st.caption("An omnibus result does not identify which groups differ. Use a justified post-hoc procedure with multiplicity control.")
+                        else:
+                            st.warning("At least two groups with two or more valid observations are required.")
+                    else:
+                        st.warning("The grouping variable must contain at least two observed groups.")
+                else:
+                    st.info("This analysis requires at least one numeric outcome and one categorical grouping variable.")
+            elif _sra_design == "Paired measurements":
+                if len(_sra_num) >= 2:
+                    _sra_p1, _sra_p2 = st.columns(2)
+                    _sra_before = _sra_p1.selectbox("Measurement 1", _sra_num, key="sra_pair_1")
+                    _sra_after = _sra_p2.selectbox("Measurement 2", [c for c in _sra_num if c != _sra_before], key="sra_pair_2")
+                    _sra_pair = _sra_df[[_sra_before, _sra_after]].apply(pd.to_numeric, errors="coerce").dropna()
+                    st.checkbox("I confirm these two columns are measured on the same units / participants", key="sra_pair_confirm")
+                    if st.session_state.get("sra_pair_confirm", False):
+                        if len(_sra_pair) >= 2:
+                            _sra_test = st.radio("Paired test", ["Paired t-test", "Wilcoxon signed-rank"], horizontal=True, key="sra_pair_test")
+                            _sra_diff = _sra_pair[_sra_before] - _sra_pair[_sra_after]
+                            _sra_stat, _sra_p = ttest_rel(_sra_pair[_sra_before], _sra_pair[_sra_after]) if _sra_test == "Paired t-test" else wilcoxon(_sra_pair[_sra_before], _sra_pair[_sra_after])
+                            _sra_dz = _sra_diff.mean()/ _sra_diff.std(ddof=1) if _sra_diff.std(ddof=1) else np.nan
+                            _sra_results.append({"Analysis": _sra_test, "Measurement 1": _sra_before, "Measurement 2": _sra_after, "Paired n": len(_sra_pair), "Mean difference": _sra_diff.mean(), "Statistic": _sra_stat, "p-value": _sra_p, "Cohen dz": _sra_dz})
+                            st.metric("p-value", f"{_sra_p:.5g}")
+                            st.write(f"Paired n = {len(_sra_pair)} · Mean difference = {_sra_diff.mean():.4g} · Cohen's dz = {_sra_dz:.3f}" if np.isfinite(_sra_dz) else f"Paired n = {len(_sra_pair)} · Mean difference = {_sra_diff.mean():.4g}")
+                        else:
+                            st.warning("At least two complete pairs are required.")
+                    else:
+                        st.warning("Paired analysis is disabled until you confirm that both columns belong to the same units.")
+                else:
+                    st.info("Paired analysis requires at least two numeric measurement columns.")
+            elif _sra_design == "One-sample comparison":
+                if _sra_num:
+                    _sra_y = st.selectbox("Numeric variable", _sra_num, key="sra_one_y")
+                    _sra_mu = st.number_input("Reference value", value=0.0, key="sra_one_mu")
+                    _sra_vals = pd.to_numeric(_sra_df[_sra_y], errors="coerce").dropna()
+                    if len(_sra_vals) >= 2:
+                        _sra_stat, _sra_p = ttest_1samp(_sra_vals, _sra_mu)
+                        _sra_results.append({"Analysis": "One-sample t-test", "Variable": _sra_y, "Reference": _sra_mu, "n": len(_sra_vals), "Mean": _sra_vals.mean(), "Statistic": _sra_stat, "p-value": _sra_p})
+                        st.metric("p-value", f"{_sra_p:.5g}")
+                        st.write(f"Mean = {_sra_vals.mean():.4g}; reference = {_sra_mu:g}; n = {len(_sra_vals)}")
+                else: st.info("No numeric variable is available.")
+            elif _sra_design == "Association / correlation":
+                if len(_sra_num) >= 2:
+                    _sra_xc, _sra_yc = st.columns(2)
+                    _sra_x = _sra_xc.selectbox("Variable X", _sra_num, key="sra_corr_x")
+                    _sra_y = _sra_yc.selectbox("Variable Y", [c for c in _sra_num if c != _sra_x], key="sra_corr_y")
+                    _sra_method = st.radio("Correlation method", ["Pearson", "Spearman"], horizontal=True, key="sra_corr_method")
+                    _sra_xy = _sra_df[[_sra_x, _sra_y]].apply(pd.to_numeric, errors="coerce").dropna()
+                    if len(_sra_xy) >= 3:
+                        _sra_r, _sra_p = pearsonr(_sra_xy[_sra_x], _sra_xy[_sra_y]) if _sra_method == "Pearson" else spearmanr(_sra_xy[_sra_x], _sra_xy[_sra_y])
+                        _sra_results.append({"Analysis": _sra_method + " correlation", "Variable X": _sra_x, "Variable Y": _sra_y, "n": len(_sra_xy), "Coefficient": _sra_r, "p-value": _sra_p})
+                        st.metric("Correlation coefficient", f"{_sra_r:.4f}")
+                        st.metric("p-value", f"{_sra_p:.5g}")
+                        st.caption("Correlation describes association; it does not establish causation.")
+                        st.scatter_chart(_sra_xy, x=_sra_x, y=_sra_y)
+                    else: st.warning("At least three complete paired observations are required.")
+                else: st.info("Correlation requires at least two numeric variables.")
+            else:
+                if len(_sra_num) >= 2:
+                    _sra_y = st.selectbox("Outcome (dependent variable)", _sra_num, key="sra_reg_y")
+                    _sra_predictors = st.multiselect("Predictor variables", [c for c in _sra_num if c != _sra_y], default=[c for c in _sra_num if c != _sra_y][:1], key="sra_reg_x")
+                    if _sra_predictors:
+                        _sra_model_data = _sra_df[[_sra_y] + _sra_predictors].apply(pd.to_numeric, errors="coerce").dropna()
+                        if len(_sra_model_data) > len(_sra_predictors) + 1:
+                            _sra_model = LinearRegression().fit(_sra_model_data[_sra_predictors], _sra_model_data[_sra_y])
+                            _sra_r2 = _sra_model.score(_sra_model_data[_sra_predictors], _sra_model_data[_sra_y])
+                            _sra_coef = pd.DataFrame({"Predictor": _sra_predictors, "Coefficient": _sra_model.coef_})
+                            st.metric("R²", f"{_sra_r2:.4f}")
+                            st.dataframe(_sra_coef, use_container_width=True, hide_index=True)
+                            _sra_results.append({"Analysis": "Multiple linear regression", "Outcome": _sra_y, "Predictors": ", ".join(_sra_predictors), "n": len(_sra_model_data), "R-squared": _sra_r2, "Intercept": _sra_model.intercept_})
+                            st.caption("This is an unadjusted ordinary least-squares fit for the selected predictors. Review linearity, residuals, influential observations, multicollinearity, and study design before reporting. Prediction is not evidence of causality.")
+                        else: st.warning("There are too few complete observations for the number of selected predictors.")
+                    else: st.info("Select at least one predictor.")
+                else: st.info("Regression requires at least two numeric variables.")
+
+        # Persist completed Smart Analysis tests across Streamlit reruns and design changes.
+        for _sra_record in _sra_results:
+            _sra_payload = json.dumps(_sra_record, sort_keys=True, default=str, ensure_ascii=False)
+            _sra_key = hashlib.sha256(_sra_payload.encode("utf-8")).hexdigest()
+            if not any(x.get("_history_key") == _sra_key for x in st.session_state.sra_test_history):
+                _sra_saved = dict(_sra_record)
+                _sra_saved["_history_key"] = _sra_key
+                _sra_saved["Generated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.session_state.sra_test_history.append(_sra_saved)
+
+        with st.expander("5 · Research context and interpretation", expanded=True):
+            _sra_question = st.text_input("Research question / objective", key="sra_research_question", placeholder="e.g., Is the mean outcome different between the two study groups?")
+            _sra_population = st.text_input("Study population / sample", key="sra_population", placeholder="Briefly describe participants or experimental units")
+            _sra_notes = st.text_area("Additional methodological notes", key="sra_notes", placeholder="Mention allocation, repeated measurements, matching, inclusion criteria, or other design details.")
+            if _sra_results:
+                _sra_res_df = pd.DataFrame(_sra_results)
+                st.dataframe(_sra_res_df, use_container_width=True, hide_index=True)
+                st.markdown("#### Download each Smart Analysis test")
+                for _sra_i, _sra_item in enumerate(_sra_results):
+                    _sra_title = str(_sra_item.get("Analysis", f"Test {_sra_i+1}"))
+                    _sra_safe = re.sub(r"[^A-Za-z0-9_-]+", "_", _sra_title).strip("_") or f"test_{_sra_i+1}"
+                    _sra_one_doc = io.BytesIO()
+                    try:
+                        from docx import Document as _SmartOneDoc
+                        _sdoc = _SmartOneDoc()
+                        _sdoc.add_heading(f"STATNOVA — {_sra_title}", 0)
+                        _sdoc.add_paragraph(f"Source: {_sra_source}")
+                        _sdoc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        for _sk, _sv in _sra_item.items():
+                            _sdoc.add_paragraph(f"{_sk}: {_sv}")
+                        _sra_one_interp = interpret_statistical_result(_sra_title, _sra_item.get("Coefficient", _sra_item.get("Statistic")), _sra_item.get("p-value"), _sra_alpha, "", _sra_item.get("n", _sra_item.get("Paired n")))
+                        _sdoc.add_heading("Scientific interpretation", level=1)
+                        _sdoc.add_paragraph("English: " + _sra_one_interp["interpretation_en"])
+                        _sdoc.add_paragraph("العربية: " + _sra_one_interp["interpretation_ar"])
+                        _sdoc.add_heading("Academic wording", level=1)
+                        _sdoc.add_paragraph(_sra_one_interp["academic_statement_en"])
+                        _sdoc.add_paragraph(_sra_one_interp["academic_statement_ar"])
+                        _sdoc.save(_sra_one_doc)
+                        _sra_one_doc.seek(0)
+                        _sdl1, _sdl2 = st.columns(2)
+                        _sdl1.download_button("Download this test — Word", _sra_one_doc.getvalue(), f"STATNOVA_{_sra_safe}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"sra_ind_docx_{_sra_i}_{hashlib.md5(_sra_safe.encode()).hexdigest()[:8]}")
+                        _sra_pdf_item = dict(_sra_item)
+                        _sra_pdf_item.update(_sra_one_interp)
+                        _sra_one_pdf = build_pdf_report(_sra_df, _sra_source, {**_sra_pdf_item, "title": _sra_title})
+                        _sdl2.download_button("Download this test — PDF", _sra_one_pdf, f"STATNOVA_{_sra_safe}.pdf", "application/pdf", key=f"sra_ind_pdf_{_sra_i}_{hashlib.md5(_sra_safe.encode()).hexdigest()[:8]}")
+                    except Exception as _sra_ind_err:
+                        st.warning(f"Individual export could not be generated: {_sra_ind_err}")
+                _sra_main = _sra_results[-1]
+                _sra_pval = _sra_main.get("p-value", np.nan)
+                _sra_analysis = str(_sra_main.get("Analysis", "Statistical analysis"))
+                _sra_p_valid = pd.notna(_sra_pval) and np.isfinite(float(_sra_pval))
+                if _sra_p_valid:
+                    if "correlation" in _sra_analysis.lower() and "Coefficient" in _sra_main:
+                        _sra_interp = interpret_statistical_result(_sra_analysis, _sra_main.get("Coefficient"), _sra_pval, _sra_alpha, "", _sra_main.get("n"))
+                        _sra_interpretation_en = _sra_interp["interpretation_en"]
+                        _sra_interpretation_ar = _sra_interp["interpretation_ar"]
+                    else:
+                        _sra_interpretation_en = f"The {_sra_analysis} produced a p-value of {_sra_pval:.5g}. " + ("The result is statistically significant at the selected alpha level; assess the effect estimate, uncertainty, assumptions, and practical relevance before drawing a conclusion." if _sra_pval < _sra_alpha else "The result is not statistically significant at the selected alpha level. This does not prove that no effect or association exists; consider the estimate, confidence interval, sample size, and study limitations.")
+                        _sra_interpretation_ar = f"أظهر تحليل {_sra_analysis} قيمة احتمالية p = {_sra_pval:.5g}. " + ("النتيجة ذات دلالة إحصائية عند مستوى الدلالة المختار؛ ويجب تقييم حجم الأثر وعدم اليقين والافتراضات والأهمية العملية قبل اعتماد الاستنتاج." if _sra_pval < _sra_alpha else "لم تصل النتيجة إلى الدلالة الإحصائية عند مستوى الدلالة المختار. وهذا لا يثبت انعدام الأثر أو الارتباط؛ ينبغي مراجعة التقدير وفاصل الثقة وحجم العينة ومحددات الدراسة.")
+                else:
+                    _sra_interpretation_en = f"The {_sra_analysis} was completed, but a valid p-value is unavailable or undefined. No significance conclusion can be made from this result. Check the data, sample sizes, and test assumptions."
+                    _sra_interpretation_ar = f"تم إجراء {_sra_analysis}، لكن قيمة p غير متاحة أو غير معرّفة. لذلك لا يمكن إصدار حكم بشأن الدلالة الإحصائية من هذه النتيجة. يُرجى مراجعة البيانات وأحجام العينات وافتراضات الاختبار."
+                st.markdown("**Editable interpretation · English**")
+                _sra_edit_en = st.text_area("English interpretation", value=_sra_interpretation_en, key="sra_edit_en", height=110)
+                st.markdown("**صياغة عربية قابلة للتحرير**")
+                _sra_edit_ar = st.text_area("التفسير العربي", value=_sra_interpretation_ar, key="sra_edit_ar", height=110)
+                st.caption("Interpretation is a draft, not a final scientific conclusion. No causal claim is generated automatically.")
+            else:
+                _sra_res_df = pd.DataFrame([{"Status": "No inferential test has been run in this session."}])
+                _sra_edit_en = "No inferential result available."
+                _sra_edit_ar = "لا توجد نتيجة استدلالية متاحة بعد."
+
+        with st.expander("6 · Export analysis", expanded=True):
+            _sra_numeric = _sra_df.select_dtypes(include=np.number)
+            _sra_missing = pd.DataFrame({"Variable": _sra_df.columns.astype(str), "Type": _sra_df.dtypes.astype(str).values, "Missing n": _sra_df.isna().sum().values, "Missing %": (_sra_df.isna().mean().values * 100).round(2)})
+            _sra_desc = _sra_numeric.describe().T if len(_sra_numeric.columns) else pd.DataFrame()
+            if not _sra_desc.empty: _sra_desc.index.name = "Variable"
+            _sra_categorical = _sra_df.select_dtypes(exclude=np.number)
+            _sra_report_lines = [
+                "STATNOVA — Smart Research Analyzer | Complete Research Report",
+                f"Source: {_sra_source}", f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                f"Rows: {len(_sra_df)}", f"Variables: {len(_sra_df.columns)}",
+                f"Duplicate rows: {int(_sra_df.duplicated().sum())}",
+                f"Missing cells: {int(_sra_df.isna().sum().sum())}",
+                f"Research question: {st.session_state.get('sra_research_question','')}",
+                f"Population: {st.session_state.get('sra_population','')}",
+                "", "DATA QUALITY AND VARIABLE PROFILE:", _sra_missing.to_string(index=False),
+                "", "DESCRIPTIVE STATISTICS (all numeric variables):",
+                _sra_desc.to_string() if not _sra_desc.empty else "No numeric variables available.",
+                "", "CATEGORICAL VARIABLE SUMMARIES:",
+                "\n\n".join([f"{c}:\n{_sra_df[c].value_counts(dropna=False).head(30).to_string()}" for c in _sra_categorical.columns]) if len(_sra_categorical.columns) else "No categorical variables.",
+                "", "CORRELATION MATRIX (numeric variables):",
+                _sra_numeric.corr().round(4).to_string() if len(_sra_numeric.columns) > 1 else "Not available: fewer than two numeric variables.",
+                "", "STATISTICAL RESULTS:", pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history]).to_string(index=False) if st.session_state.sra_test_history else "No inferential tests recorded.",
+                "", "ENGLISH INTERPRETATION:", _sra_edit_en,
+                "", "ARABIC INTERPRETATION:", _sra_edit_ar,
+                "", "ASSUMPTIONS, EFFECT SIZES AND CONFIDENCE INTERVALS:",
+                "Only diagnostics and estimates actually computed by the selected analysis are reported. Any unavailable assumption test, effect size, or confidence interval is not inferred or fabricated.",
+                "", "VISUALIZATIONS:", "Distribution charts for available numeric variables are included in PDF and Word exports where chart generation succeeds.",
+                "", "LIMITATIONS:", "Statistical interpretation must be considered alongside study design, data quality, sample size, assumptions, effect estimates, uncertainty, and practical relevance."
+            ]
+            _sra_chart_buffers = []
+            try:
+                import matplotlib.pyplot as _sra_plt
+                for _sra_col in _sra_numeric.columns[:6]:
+                    _sra_vals = _sra_numeric[_sra_col].dropna()
+                    if len(_sra_vals) >= 2:
+                        _sra_fig, _sra_ax = _sra_plt.subplots(figsize=(7, 3.5))
+                        _sra_ax.hist(_sra_vals, bins="auto", edgecolor="black")
+                        _sra_ax.set_title(f"Distribution: {_sra_col}")
+                        _sra_ax.set_xlabel(str(_sra_col)); _sra_ax.set_ylabel("Frequency")
+                        _sra_fig.tight_layout()
+                        _sra_img = io.BytesIO(); _sra_fig.savefig(_sra_img, format="png", dpi=160); _sra_img.seek(0)
+                        _sra_chart_buffers.append((_sra_col, _sra_img.getvalue()))
+                        _sra_plt.close(_sra_fig)
+            except Exception:
+                _sra_chart_buffers = []
+            _sra_csv = _sra_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("Download analyzed dataset (CSV)", _sra_csv, "statnova_analyzed_dataset.csv", "text/csv", key="sra_csv_export")
+            try:
+                import pyreadstat as _sra_pyreadstat
+                _sra_sav = io.BytesIO()
+                _sra_pyreadstat.write_sav(_sra_df, _sra_sav)
+                st.download_button("Download SPSS data (.sav)", _sra_sav.getvalue(), "statnova_smart_data.sav", "application/octet-stream", key="sra_sav_export")
+            except Exception:
+                st.caption("SPSS .sav export requires pyreadstat in requirements.txt.")
+            _sra_excel = io.BytesIO()
+            with pd.ExcelWriter(_sra_excel, engine="openpyxl") as _sra_writer:
+                _sra_df.to_excel(_sra_writer, sheet_name="Data", index=False)
+                _sra_profile.to_excel(_sra_writer, sheet_name="Variable_Profile", index=False)
+                pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history]).to_excel(_sra_writer, sheet_name="Analysis_Results", index=False)
+                pd.DataFrame([{"Research question": st.session_state.get("sra_research_question", ""), "Population": st.session_state.get("sra_population", ""), "English interpretation": _sra_edit_en, "Arabic interpretation": _sra_edit_ar}]).to_excel(_sra_writer, sheet_name="Interpretation", index=False)
+                _sra_missing.to_excel(_sra_writer, sheet_name="Data_Quality", index=False)
+                _sra_desc.to_excel(_sra_writer, sheet_name="Descriptive_Statistics")
+                if len(_sra_numeric.columns) > 1:
+                    _sra_numeric.corr().to_excel(_sra_writer, sheet_name="Correlations")
+                _sra_df.describe(include="all").transpose().to_excel(_sra_writer, sheet_name="Full_Profile")
+            st.download_button("Download complete Excel report", _sra_excel.getvalue(), "statnova_smart_analysis.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="sra_xlsx_export")
+            _sra_txt = "\n".join(_sra_report_lines).encode("utf-8")
+            st.download_button("Download research report (TXT)", _sra_txt, "statnova_smart_research_report.txt", "text/plain", key="sra_txt_export")
+            try:
+                from docx import Document as _SRA_Document
+                from docx.enum.text import WD_ALIGN_PARAGRAPH as _SRA_ALIGN
+                from docx.oxml import OxmlElement as _SRA_OxmlElement
+                from docx.oxml.ns import qn as _SRA_qn
+                from docx.enum.table import WD_TABLE_ALIGNMENT as _SRA_TABLE_ALIGN
+                from docx.shared import Inches as _SRA_Inches, Pt as _SRA_Pt
+                _sra_doc = _SRA_Document()
+                _sra_section = _sra_doc.sections[0]
+                _sra_section.top_margin = _SRA_Inches(0.55)
+                _sra_section.bottom_margin = _SRA_Inches(0.55)
+                _sra_section.left_margin = _SRA_Inches(0.5)
+                _sra_section.right_margin = _SRA_Inches(0.5)
+                _sra_doc.add_heading("STATNOVA — Smart Research Analyzer", 0)
+                _sra_doc.add_paragraph(f"Source: {st.session_state.get('sra_source_name', 'Uploaded dataset')} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Rows: {len(_sra_df)} | Variables: {len(_sra_df.columns)}")
+                def _sra_add_table(_frame, _title, _max_rows=120, _include_index=True):
+                    _sra_doc.add_heading(_title, level=1)
+                    _frame = _frame.copy()
+                    if _include_index and _frame.index.name is not None:
+                        _frame = _frame.reset_index()
+                    elif _include_index and not isinstance(_frame.index, pd.RangeIndex):
+                        _frame = _frame.reset_index()
+                    else:
+                        _frame = _frame.reset_index(drop=True)
+                    # Never export pandas' synthetic index column.
+                    _frame = _frame.loc[:, [c for c in _frame.columns if str(c).lower() != 'index']]
+                    if len(_frame) > _max_rows:
+                        _frame = _frame.head(_max_rows)
+                    if _frame.empty:
+                        _sra_doc.add_paragraph("No data available.")
+                        return
+                    _table = _sra_doc.add_table(rows=1, cols=max(1, len(_frame.columns)))
+                    _table.style = "Table Grid"
+                    _table.alignment = _SRA_TABLE_ALIGN.CENTER
+                    _table.autofit = True
+                    _hdr = _table.rows[0]
+                    _trPr = _hdr._tr.get_or_add_trPr()
+                    _repeat = _SRA_OxmlElement('w:tblHeader'); _repeat.set(_SRA_qn('w:val'), 'true'); _trPr.append(_repeat)
+                    for _i, _col in enumerate(_frame.columns):
+                        _hdr.cells[_i].text = str(_col)
+                    for _, _rec in _frame.iterrows():
+                        _cells = _table.add_row().cells
+                        for _i, _val in enumerate(_rec.tolist()):
+                            if _i < len(_cells):
+                                if pd.isna(_val): _cells[_i].text = ""
+                                elif isinstance(_val, (float, np.floating)): _cells[_i].text = f"{float(_val):.4f}".rstrip('0').rstrip('.')
+                                else: _cells[_i].text = str(_val)[:100]
+                    _is_wide = len(_frame.columns) >= 7
+                    for _row in _table.rows:
+                        for _cell in _row.cells:
+                            for _para in _cell.paragraphs:
+                                _para.paragraph_format.space_after = _SRA_Pt(0)
+                                for _run in _para.runs:
+                                    _run.font.size = _SRA_Pt(5.5 if _is_wide else 8)
+                _sra_doc.add_heading("Research overview", level=1)
+                _sra_doc.add_paragraph(f"Research question: {st.session_state.get('sra_research_question','Not provided')}")
+                _sra_doc.add_paragraph(f"Population: {st.session_state.get('sra_population','Not provided')}")
+                _sra_doc.add_heading("Data quality", level=1)
+                _sra_add_table(_sra_missing, "Variable-level missingness", _include_index=False)
+                _sra_doc.add_paragraph(f"Duplicate rows: {int(_sra_df.duplicated().sum())} | Missing cells: {int(_sra_df.isna().sum().sum())}")
+                if not _sra_desc.empty:
+                    _sra_add_table(_sra_desc, "Descriptive statistics", _include_index=True)
+                if len(_sra_numeric.columns) > 1:
+                    _sra_corr = _sra_numeric.corr().round(4)
+                    _sra_corr.index.name = "Variable"
+                    _sra_add_table(_sra_corr, "Correlation matrix", _include_index=True)
+                _sra_cat_cols = [c for c in _sra_categorical.columns if str(c).strip().lower() not in {"participant_id", "participant id", "id", "record_id"}]
+                if _sra_cat_cols:
+                    _sra_doc.add_heading("Categorical variable summaries", level=1)
+                    for _cat_col in _sra_cat_cols:
+                        _cat_counts = _sra_df[_cat_col].value_counts(dropna=False).head(30).rename_axis("Category").reset_index(name="Frequency")
+                        _sra_add_table(_cat_counts, f"Frequency table — {_cat_col}", 30, _include_index=False)
+                _sra_history_df = pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history])
+                _sra_add_table(_sra_history_df if not _sra_history_df.empty else _sra_res_df, "Statistical results — all tests in this session", 100, _include_index=False)
+                _sra_doc.add_heading("English interpretation", level=1)
+                _sra_doc.add_paragraph(str(_sra_edit_en or "Not provided"))
+                _sra_doc.add_heading("Arabic interpretation", level=1)
+                _sra_ar_para = _sra_doc.add_paragraph(str(_sra_edit_ar or "غير متوفر"))
+                _sra_ar_para.alignment = _SRA_ALIGN.RIGHT
+                _sra_pPr = _sra_ar_para._p.get_or_add_pPr()
+                _sra_bidi = _SRA_OxmlElement('w:bidi'); _sra_bidi.set(_SRA_qn('w:val'), '1'); _sra_pPr.append(_sra_bidi)
+                for _run in _sra_ar_para.runs:
+                    _rPr = _run._element.get_or_add_rPr(); _rtl = _SRA_OxmlElement('w:rtl'); _rtl.set(_SRA_qn('w:val'), '1'); _rPr.append(_rtl)
+                _sra_doc.add_heading("Assumptions, effect sizes and confidence intervals", level=1)
+                _sra_doc.add_paragraph("Only diagnostics and estimates actually computed by the selected analysis are reported. Unavailable results are not inferred or fabricated.")
+                _sra_doc.add_heading("Limitations", level=1)
+                _sra_doc.add_paragraph("Interpret findings alongside study design, data quality, sample size, assumptions, effect estimates, uncertainty and practical relevance.")
+                if _sra_chart_buffers:
+                    _sra_doc.add_page_break()
+                    _sra_doc.add_heading("Distribution charts", level=1)
+                    for _sra_chart_name, _sra_chart_bytes in _sra_chart_buffers:
+                        _sra_doc.add_paragraph(f"Distribution: {_sra_chart_name}")
+                        _sra_doc.add_picture(io.BytesIO(_sra_chart_bytes), width=_SRA_Inches(5.8))
+                _sra_docx = io.BytesIO()
+                _sra_doc.save(_sra_docx)
+                st.download_button("Download Word report", _sra_docx.getvalue(), "statnova_smart_research_report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="sra_docx_export")
+            except Exception as _sra_docx_exc:
+                st.caption(f"Word export unavailable: {_sra_docx_exc}")
+            try:
+                from reportlab.platypus import SimpleDocTemplate as _SRA_PDFDoc, Paragraph as _SRA_Paragraph, Spacer as _SRA_Spacer, Table as _SRA_PDFTable, TableStyle as _SRA_TableStyle, LongTable as _SRA_LongTable, PageBreak as _SRA_PageBreak, Image as _SRA_PDFImage
+                from reportlab.lib import colors as _SRA_colors
+                from reportlab.lib.styles import getSampleStyleSheet as _SRA_Styles, ParagraphStyle as _SRA_ParagraphStyle
+                from reportlab.pdfbase import pdfmetrics as _SRA_pdfmetrics
+                from reportlab.pdfbase.ttfonts import TTFont as _SRA_TTFont
+                from reportlab.lib.enums import TA_RIGHT as _SRA_TA_RIGHT
+                from reportlab.lib import utils as _SRA_utils
+                from pathlib import Path as _SRA_Path
+                import html as _SRA_html
+                import arabic_reshaper as _SRA_reshaper
+                from bidi.algorithm import get_display as _SRA_get_display
+                _sra_font_path = _SRA_Path(__file__).with_name("NotoNaskhArabic-Regular.ttf")
+                if not _sra_font_path.exists():
+                    raise FileNotFoundError("Arabic font file NotoNaskhArabic-Regular.ttf is missing beside app_v11_final.py")
+                if "STATNOVAArabic" not in _SRA_pdfmetrics.getRegisteredFontNames():
+                    _SRA_pdfmetrics.registerFont(_SRA_TTFont("STATNOVAArabic", str(_sra_font_path)))
+                _sra_pdf = io.BytesIO()
+                _sra_story = []
+                _sra_styles = _SRA_Styles()
+                _sra_body = _SRA_ParagraphStyle("STATNOVABody", parent=_sra_styles["BodyText"], fontName="Helvetica", fontSize=8, leading=11, spaceAfter=4)
+                _sra_heading = _SRA_ParagraphStyle("STATNOVAHeading", parent=_sra_styles["Heading2"], fontName="Helvetica-Bold", fontSize=12, leading=15, spaceBefore=9, spaceAfter=5, keepWithNext=True)
+                _sra_ar_style = _SRA_ParagraphStyle("STATNOVAArabic", parent=_sra_body, fontName="STATNOVAArabic", alignment=_SRA_TA_RIGHT, leading=15)
+                _sra_title_style = _SRA_ParagraphStyle("STATNOVATitle", parent=_sra_styles["Title"], fontName="Helvetica-Bold", fontSize=18, leading=22, spaceAfter=10)
+                _sra_cell = _SRA_ParagraphStyle("STATNOVACell", parent=_sra_body, fontSize=6.5, leading=8)
+                _sra_cell_header = _SRA_ParagraphStyle("STATNOVACellHeader", parent=_sra_cell, fontName="Helvetica-Bold", fontSize=6.5, leading=8)
+                def _sra_pdf_para(_value, _header=False):
+                    _v = "" if _value is None or (not isinstance(_value, str) and pd.isna(_value)) else str(_value)
+                    _v = _SRA_html.escape(_v).replace("\n", "<br/>")
+                    return _SRA_Paragraph(_v or "&nbsp;", _sra_cell_header if _header else _sra_cell)
+                def _sra_pdf_table(_frame, _title, _max_rows=120, _include_index=True):
+                    _sra_story.append(_SRA_Paragraph(_SRA_html.escape(_title), _sra_heading))
+                    _frame = _frame.copy()
+                    if _include_index and _frame.index.name is not None:
+                        _frame = _frame.reset_index()
+                    elif _include_index and not isinstance(_frame.index, pd.RangeIndex):
+                        _frame = _frame.reset_index()
+                    else:
+                        _frame = _frame.reset_index(drop=True)
+                    _frame = _frame.loc[:, [c for c in _frame.columns if str(c).lower() != 'index']]
+                    if len(_frame) > _max_rows:
+                        _frame = _frame.head(_max_rows)
+                    if _frame.empty:
+                        _sra_story.append(_SRA_Paragraph("No data available.", _sra_body)); return
+                    _data = [[_sra_pdf_para(c, True) for c in _frame.columns]]
+                    for _rec in _frame.itertuples(index=False, name=None):
+                        _row = []
+                        for _v in _rec:
+                            if isinstance(_v, (float, np.floating)) and pd.notna(_v): _v = f"{float(_v):.4f}".rstrip('0').rstrip('.')
+                            _row.append(_sra_pdf_para(_v))
+                        _data.append(_row)
+                    _n = len(_frame.columns)
+                    _available = 515
+                    _width = _available / max(1, _n)
+                    _widths = [_width] * _n
+                    _tbl = _SRA_LongTable(_data, colWidths=_widths, repeatRows=1, hAlign="LEFT")
+                    _tbl.setStyle(_SRA_TableStyle([
+                        ("BACKGROUND", (0,0), (-1,0), _SRA_colors.HexColor("#e7f0f3")),
+                        ("TEXTCOLOR", (0,0), (-1,0), _SRA_colors.HexColor("#183b56")),
+                        ("GRID", (0,0), (-1,-1), 0.35, _SRA_colors.HexColor("#9aa7b2")),
+                        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+                        ("LEFTPADDING", (0,0), (-1,-1), 3), ("RIGHTPADDING", (0,0), (-1,-1), 3),
+                        ("TOPPADDING", (0,0), (-1,-1), 3), ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                    ]))
+                    _sra_story.append(_tbl)
+                    _sra_story.append(_SRA_Spacer(1, 7))
+                _sra_story.append(_SRA_Paragraph("STATNOVA — Smart Research Analyzer", _sra_title_style))
+                _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Source: {st.session_state.get('sra_source_name', 'Uploaded dataset')} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Rows: {len(_sra_df)} | Variables: {len(_sra_df.columns)}"), _sra_body))
+                _sra_story.append(_SRA_Paragraph("Research overview", _sra_heading))
+                _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Research question: {st.session_state.get('sra_research_question','Not provided')}"), _sra_body))
+                _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Population: {st.session_state.get('sra_population','Not provided')}"), _sra_body))
+                _sra_story.append(_SRA_Paragraph("Data quality", _sra_heading))
+                _sra_pdf_table(_sra_missing, "Variable-level missingness", _include_index=False)
+                _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Duplicate rows: {int(_sra_df.duplicated().sum())} | Missing cells: {int(_sra_df.isna().sum().sum())}"), _sra_body))
+                if not _sra_desc.empty: _sra_pdf_table(_sra_desc, "Descriptive statistics", _include_index=True)
+                if len(_sra_numeric.columns) > 1:
+                    _sra_corr = _sra_numeric.corr().round(4); _sra_corr.index.name = "Variable"
+                    _sra_pdf_table(_sra_corr, "Correlation matrix", _include_index=True)
+                _sra_cat_cols = [c for c in _sra_categorical.columns if str(c).strip().lower() not in {"participant_id", "participant id", "id", "record_id"}]
+                if _sra_cat_cols:
+                    _sra_story.append(_SRA_Paragraph("Categorical variable summaries", _sra_heading))
+                    for _cat_col in _sra_cat_cols:
+                        _cat_counts = _sra_df[_cat_col].value_counts(dropna=False).head(30).rename_axis("Category").reset_index(name="Frequency")
+                        _sra_pdf_table(_cat_counts, f"Frequency table — {_cat_col}", 30, _include_index=False)
+                _sra_history_df = pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history])
+                _sra_pdf_table(_sra_history_df if not _sra_history_df.empty else _sra_res_df, "Statistical results — all tests in this session", 100, _include_index=False)
+                _sra_story.append(_SRA_Paragraph("English interpretation", _sra_heading))
+                _sra_story.append(_SRA_Paragraph(_SRA_html.escape(str(_sra_edit_en or "Not provided")), _sra_body))
+                _sra_story.append(_SRA_Paragraph("Arabic interpretation", _sra_heading))
+                _sra_ar_text = _SRA_html.escape(str(_sra_edit_ar or "غير متوفر"))
+                _sra_ar_text = _SRA_get_display(_SRA_reshaper.reshape(_sra_ar_text))
+                _sra_story.append(_SRA_Paragraph(_sra_ar_text, _sra_ar_style))
+                _sra_story.append(_SRA_Paragraph("Assumptions, effect sizes and confidence intervals", _sra_heading))
+                _sra_story.append(_SRA_Paragraph("Only diagnostics and estimates actually computed by the selected analysis are reported. Unavailable results are not inferred or fabricated.", _sra_body))
+                _sra_story.append(_SRA_Paragraph("Limitations", _sra_heading))
+                _sra_story.append(_SRA_Paragraph("Interpret findings alongside study design, data quality, sample size, assumptions, effect estimates, uncertainty and practical relevance.", _sra_body))
+                if _sra_chart_buffers:
+                    _sra_story.append(_SRA_PageBreak())
+                    _sra_story.append(_SRA_Paragraph("Distribution charts", _sra_heading))
+                    for _sra_chart_name, _sra_chart_bytes in _sra_chart_buffers:
+                        _sra_story.append(_SRA_Paragraph(_SRA_html.escape(f"Distribution: {_sra_chart_name}"), _sra_body))
+                        _sra_story.append(_SRA_PDFImage(io.BytesIO(_sra_chart_bytes), width=470, height=235))
+                        _sra_story.append(_SRA_Spacer(1, 8))
+                _SRA_PDFDoc(_sra_pdf, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=38, bottomMargin=38).build(_sra_story)
+                st.download_button("Download PDF report", _sra_pdf.getvalue(), "statnova_smart_research_report.pdf", "application/pdf", key="sra_pdf_export")
+                st.caption("The complete report above includes every distinct Smart Analysis test recorded in this session.")
+            except Exception as _sra_pdf_exc:
+                st.caption(f"PDF export unavailable: {_sra_pdf_exc}. Ensure arabic-reshaper, python-bidi, and the bundled Arabic font are included.")
 
 # ---------- About ----------
 elif page == "About":
@@ -835,14 +1739,17 @@ elif page == "About":
     - Selected parametric and non-parametric tests
     - Correlation and simple linear regression
     - Basic scientific visualizations
+    - Results interpretation support (bilingual)
+    - Multi-sheet Excel import and structured workbook export
+    - Separate, approval-based cleaning copies
     - CSV and Excel exports
     """)
     st.warning("""
     This is a development version, not a clinically validated or production-certified system.
     Statistical outputs depend on data quality, study design, assumptions, and correct test selection.
-    User accounts, payment subscriptions, a complete multilingual interface, and a formal
-    privacy workflow are not included yet. Effect sizes and confidence intervals are still
-    being expanded and validated across the available statistical procedures.
+    Secure user accounts, payment subscriptions, and a formal privacy workflow are not included yet.
+    Interpretation guidance is rule-based and must be checked against the study design and scientific context.
+    Effect sizes and confidence intervals are still being expanded and validated across procedures.
     """)
 
 st.divider()

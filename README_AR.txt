@@ -1,3 +1,5 @@
+STATNOVA V11.6 — Bilingual Statistical Interpretation Upgrade
+
 STATNOVA V11.5 — Smart + Standard Individual and Complete Reports
 
 محتويات الحزمة:
@@ -21,3 +23,11 @@ STATNOVA V11.5 — Smart + Standard Individual and Complete Reports
 ملاحظة:
 - SAV هو ملف بيانات للتحليل في SPSS، وليس تقرير مخرجات SPSS كاملًا.
 - سجل الاختبارات محفوظ في جلسة التطبيق الحالية؛ إعادة تحميل الصفحة/الجلسة أو فتح جلسة جديدة قد تبدأ سجلًا جديدًا.
+
+
+V11.6 changes:
+- Method-specific coefficient labels for Pearson (r), Spearman (rho), and Kendall (tau).
+- Automatic Arabic and English interpretation with direction/strength where applicable, p-value decision, and sample size when available.
+- Academic wording in Arabic and English.
+- Interpretation included in individual Word/PDF exports for Standard and Smart analyses.
+- No uncomputed confidence intervals or effect sizes are invented.
