@@ -1,11 +1,11 @@
 streamlit
 pandas
 numpy
-matplotlib
 scipy
-statsmodels
-scikit-learn
+matplotlib
+openpyxl
 reportlab
 python-docx
-openpyxl
+statsmodels
+scikit-learn
 pyreadstat

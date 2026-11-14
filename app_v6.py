@@ -1,4 +1,4 @@
-# STATNOVA app_v6 — Bilingual Statistical Interpretation + Complete Analysis Records
+# STATNOVA app_v6 — Refined Results, Paired-Data Defaults + df Reporting
 # Global report exports: PDF, DOCX, XLSX, CSV and optional SPSS SAV.
 # Built as an additive upgrade from app_v6.py; original v6 remains unchanged.
 # Development build: validate statistical choices and outputs before research use.
@@ -112,6 +112,18 @@ def load_data(uploaded):
 def numeric_columns(df):
     return df.select_dtypes(include=np.number).columns.tolist()
 
+def preferred_pre_post_columns(columns):
+    """Suggest baseline/pre and follow-up/post columns by names; never changes data."""
+    names = list(columns)
+    before_tokens = ("pre", "before", "baseline", "initial", "قبلي", "قبل")
+    after_tokens = ("post", "after", "follow", "final", "قبعد", "بعد")
+    def has_token(name, tokens):
+        value = str(name).lower()
+        return any(token in value for token in tokens)
+    first = next((i for i, name in enumerate(names) if has_token(name, before_tokens)), 0)
+    second = next((i for i, name in enumerate(names) if i != first and has_token(name, after_tokens)), next((i for i in range(len(names)) if i != first), 0))
+    return first, second
+
 def categorical_columns(df):
     return df.select_dtypes(exclude=np.number).columns.tolist()
 
@@ -201,11 +213,13 @@ def interpret_statistical_result(title, statistic, pvalue, alpha=0.05, note="", 
 def result_card(title, statistic, pvalue, alpha=0.05, note=""):
     _n_match = re.search(r"(?:observations|pairs|sample size|n)\s*[:=]\s*(\d+)", str(note), re.I)
     _n = int(_n_match.group(1)) if _n_match else None
+    _df_match = re.search(r"(?:Welch degrees of freedom|degrees of freedom)\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", str(note), re.I)
+    _df = float(_df_match.group(1)) if _df_match else (float(_n - 1) if _n and ("t-test" in str(title).lower() or "t test" in str(title).lower()) else None)
     _interpretation = interpret_statistical_result(title, statistic, pvalue, alpha, note, _n)
     record = {
         "title": str(title), "statistic": float(statistic) if np.isfinite(statistic) else None,
         "statistic_label": _interpretation["statistic_label"], "pvalue": float(pvalue) if pvalue is not None and np.isfinite(pvalue) else None,
-        "alpha": float(alpha), "note": str(note), "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "alpha": float(alpha), "degrees_of_freedom": _df, "note": str(note), "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         **_interpretation
     }
     st.session_state.last_result = record
@@ -213,10 +227,11 @@ def result_card(title, statistic, pvalue, alpha=0.05, note=""):
         st.session_state.analysis_results = []
     st.session_state.analysis_results.append(record.copy())
     st.subheader(title)
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric(record.get("statistic_label", "Test statistic"), f"{statistic:.5g}" if np.isfinite(statistic) else "N/A")
     c2.metric("p-value", p_text(pvalue))
-    c3.metric("Significance level (α)", f"{alpha:.3f}")
+    c3.metric("Degrees of freedom (df)", f"{_df:.3f}" if _df is not None and np.isfinite(_df) else "N/A")
+    c4.metric("Significance level (α)", f"{alpha:.3f}")
     if np.isfinite(pvalue):
         if pvalue < alpha:
             st.success(f"Statistically significant at α = {alpha:.3f}.")
@@ -589,16 +604,19 @@ elif page == "Statistical Tests":
                 "أجب عن أسئلة تصميم الدراسة للحصول على اقتراح مبدئي. "
                 "الاقتراح لا يستبدل حكم الباحث أو مراجعة افتراضات الاختبار."
             )
+            _pre_i, _post_i = preferred_pre_post_columns(nums)
+            _has_pre_post = len(nums) >= 2 and _pre_i != _post_i and any(t in str(nums[_pre_i]).lower() for t in ("pre", "before", "baseline", "قبلي", "قبل")) and any(t in str(nums[_post_i]).lower() for t in ("post", "after", "follow", "final", "بعد"))
+            _design_options = [
+                "Independent groups — two groups",
+                "Independent groups — three or more groups",
+                "Paired measurements — same participants",
+                "One sample compared with a reference value",
+                "Association between two categorical variables",
+                "Association between two numeric variables"
+            ]
             design = st.selectbox(
-                "Study design",
-                [
-                    "Independent groups — two groups",
-                    "Independent groups — three or more groups",
-                    "Paired measurements — same participants",
-                    "One sample compared with a reference value",
-                    "Association between two categorical variables",
-                    "Association between two numeric variables"
-                ],
+                "Study design", _design_options,
+                index=2 if _has_pre_post else 0,
                 key="advisor_design"
             )
 
@@ -690,7 +708,7 @@ elif page == "Statistical Tests":
                             if table.shape[0] < 2 or table.shape[1] < 2:
                                 raise ValueError("Both variables must contain at least two observed categories.")
                             chi, p, dof, expected = chi2_contingency(table)
-                            st.dataframe(table, use_container_width=True)
+                            st.dataframe(table, use_container_width=True, hide_index=False)
                             result_card(
                                 "Chi-square test of independence", chi, p, alpha,
                                 f"Degrees of freedom: {dof}. Smallest expected frequency: {expected.min():.3g}. "
@@ -700,7 +718,8 @@ elif page == "Statistical Tests":
                             st.error(f"Test could not be completed: {exc}")
             else:
                 c1, c2 = st.columns(2)
-                xcol = c1.selectbox("Numeric variable", nums, key="test_numeric")
+                _pre_i, _post_i = preferred_pre_post_columns(nums)
+                xcol = c1.selectbox("Numeric variable", nums, index=_pre_i, key="test_numeric")
                 group_col = None
                 if test not in ["One-sample t-test", "Paired samples t-test", "Wilcoxon signed-rank"]:
                     if not cats:
@@ -712,7 +731,8 @@ elif page == "Statistical Tests":
                 if test in ["Paired samples t-test", "Wilcoxon signed-rank"]:
                     second_options = [v for v in nums if v != xcol]
                     if second_options:
-                        second = st.selectbox("Second paired numeric variable", second_options)
+                        _preferred_second = nums[_post_i] if nums[_post_i] in second_options else second_options[0]
+                        second = st.selectbox("Second paired numeric variable", second_options, index=second_options.index(_preferred_second))
                     else:
                         st.warning("A paired test requires at least two numeric variables.")
 
@@ -1128,7 +1148,7 @@ elif page == "Reports & Export":
         st.subheader("All statistical tests performed")
         if _all_results:
             _results_frame = pd.DataFrame(_all_results)
-            st.dataframe(_results_frame, use_container_width=True)
+            st.dataframe(_results_frame, use_container_width=True, hide_index=True)
             _all_doc = _DOCX_Document()
             _all_doc.add_heading("STATNOVA — Complete Statistical Analysis Report", 0)
             _all_doc.add_paragraph(f"Source: {st.session_state.source_name} | Tests: {len(_all_results)} | Generated: {datetime.now():%Y-%m-%d %H:%M}")
