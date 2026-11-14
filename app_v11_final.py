@@ -1,10 +1,12 @@
-# STATNOVA V11 FINAL — Smart Research Analytics
+# STATNOVA V11.4 — Standard Analysis Individual + Combined Exports
 # Global report exports: PDF, DOCX, XLSX, CSV and optional SPSS SAV.
 # Built as an additive upgrade from app_v6.py; original v6 remains unchanged.
 # Development build: validate statistical choices and outputs before research use.
 
 import io
 import re
+import json
+import hashlib
 from datetime import datetime
 from itertools import combinations
 
@@ -14,7 +16,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from scipy.stats import (
     ttest_ind, ttest_rel, ttest_1samp, f_oneway, mannwhitneyu,
-    wilcoxon, kruskal, chi2_contingency, pearsonr, spearmanr, kendalltau, studentized_range
+    wilcoxon, kruskal, chi2_contingency, pearsonr, spearmanr, kendalltau, studentized_range, linregress, t as t_dist
 )
 from statsmodels.stats.oneway import anova_oneway
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
@@ -121,14 +123,18 @@ def p_text(p):
     return f"{p:.5g}" if np.isfinite(p) else "N/A"
 
 def result_card(title, statistic, pvalue, alpha=0.05, note=""):
-    st.session_state.last_result = {
+    record = {
         "title": str(title), "statistic": float(statistic) if np.isfinite(statistic) else None,
-        "pvalue": float(pvalue) if np.isfinite(pvalue) else None,
-        "alpha": float(alpha), "note": str(note)
+        "statistic_label": "Test statistic", "pvalue": float(pvalue) if pvalue is not None and np.isfinite(pvalue) else None,
+        "alpha": float(alpha), "note": str(note), "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
+    st.session_state.last_result = record
+    if "analysis_results" not in st.session_state:
+        st.session_state.analysis_results = []
+    st.session_state.analysis_results.append(record.copy())
     st.subheader(title)
     c1, c2, c3 = st.columns(3)
-    c1.metric("Test statistic", f"{statistic:.5g}" if np.isfinite(statistic) else "N/A")
+    c1.metric(record.get("statistic_label", "Test statistic"), f"{statistic:.5g}" if np.isfinite(statistic) else "N/A")
     c2.metric("p-value", p_text(pvalue))
     c3.metric("Significance level (α)", f"{alpha:.3f}")
     if np.isfinite(pvalue):
@@ -138,6 +144,18 @@ def result_card(title, statistic, pvalue, alpha=0.05, note=""):
             st.info(f"Not statistically significant at α = {alpha:.3f}.")
     if note:
         st.caption(note)
+    # Individual export for this completed test
+    try:
+        from docx import Document as _OneDoc
+        _d = _OneDoc(); _d.add_heading(f"STATNOVA — {title}", 0)
+        for _k, _v in record.items(): _d.add_paragraph(f"{_k}: {_v}")
+        _b = io.BytesIO(); _d.save(_b)
+        _c1, _c2 = st.columns(2)
+        _c1.download_button("Download this test — Word", _b.getvalue(), f"{safe_filename(title)}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"individual_docx_{len(st.session_state.analysis_results)}")
+        _pdf = build_pdf_report(st.session_state.data, st.session_state.source_name, record)
+        _c2.download_button("Download this test — PDF", _pdf, f"{safe_filename(title)}.pdf", "application/pdf", key=f"individual_pdf_{len(st.session_state.analysis_results)}")
+    except Exception as _export_error:
+        st.caption(f"Individual report export unavailable: {_export_error}")
 
 def clean_numeric(series):
     return pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
@@ -245,6 +263,8 @@ if "cleaned_data" not in st.session_state:
     st.session_state.cleaned_data = None
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
+if "analysis_results" not in st.session_state:
+    st.session_state.analysis_results = []
 if "interpretation_language" not in st.session_state:
     st.session_state.interpretation_language = "English + العربية"
 
@@ -737,7 +757,16 @@ elif page == "Relationships & Regression":
                     model = LinearRegression().fit(pair[[x]], pair[y])
                     pred = model.predict(pair[[x]])
                     r2 = model.score(pair[[x]], pair[y])
-                    st.session_state.last_result = {"title": "Simple linear regression", "statistic": float(r2), "pvalue": None, "alpha": 0.05, "note": f"Outcome: {y}; predictor: {x}; intercept: {model.intercept_:.6g}; slope: {model.coef_[0]:.6g}; n={len(pair)}"}
+                    _lr = linregress(pair[x].to_numpy(dtype=float), pair[y].to_numpy(dtype=float))
+                    _df_reg = len(pair) - 2
+                    _tcrit = float(t_dist.ppf(0.975, _df_reg)) if _df_reg > 0 else float("nan")
+                    _slope_ci = (float(_lr.slope - _tcrit * _lr.stderr), float(_lr.slope + _tcrit * _lr.stderr)) if np.isfinite(_tcrit) and np.isfinite(_lr.stderr) else (float("nan"), float("nan"))
+                    _reg_note = (f"Outcome: {y}; predictor: {x}; intercept: {model.intercept_:.6g}; "
+                                 f"slope: {model.coef_[0]:.6g}; R: {_lr.rvalue:.6g}; R-squared: {r2:.6g}; "
+                                 f"slope standard error: {_lr.stderr:.6g}; slope 95% CI: [{_slope_ci[0]:.6g}, {_slope_ci[1]:.6g}]; n={len(pair)}")
+                    result_card("Simple linear regression", _lr.slope, _lr.pvalue, 0.05, _reg_note)
+                    st.session_state.last_result.update({"statistic_label": "Slope coefficient", "r": float(_lr.rvalue), "r_squared": float(r2), "intercept": float(_lr.intercept), "slope": float(_lr.slope), "slope_stderr": float(_lr.stderr), "slope_95ci_lower": _slope_ci[0], "slope_95ci_upper": _slope_ci[1], "n": int(len(pair))})
+                    st.session_state.analysis_results[-1].update(st.session_state.last_result)
                     c1, c2, c3 = st.columns(3)
                     c1.metric("R-squared", f"{r2:.5f}")
                     c2.metric("Intercept", f"{model.intercept_:.5g}")
@@ -838,6 +867,9 @@ elif page == "Results Interpretation":
         elif not np.isfinite(float(pval)):
             en = "A valid p-value is unavailable or undefined, so statistical significance cannot be determined from this result. Review the data and test assumptions."
             ar = "قيمة p غير متاحة أو غير معرّفة؛ لذلك لا يمكن تحديد الدلالة الإحصائية من هذه النتيجة. راجعي البيانات وافتراضات الاختبار."
+        elif "regression" in title_lower:
+            en = "The fitted linear regression estimates the expected change in the outcome for a one-unit increase in the predictor. Review the slope p-value and confidence interval alongside R-squared; the model does not establish causation and should be checked for linearity, residual behavior, independence, and influential observations."
+            ar = "يقدّر نموذج الانحدار الخطي التغير المتوقع في المتغير الناتج عند زيادة المتغير المتنبئ وحدة واحدة. تُراجع قيمة p للميل وفترة الثقة مع R²، ولا يثبت النموذج السببية. وينبغي فحص الخطية وسلوك البواقي والاستقلالية والقيم المؤثرة."
         elif "correlation" in title_lower:
             direction = "positive" if (result.get("statistic") or 0) > 0 else "negative" if (result.get("statistic") or 0) < 0 else "approximately zero"
             en = f"The correlation coefficient indicates a {direction} association. Its magnitude describes the strength of the association for the selected method. Correlation does not demonstrate causation."
@@ -880,8 +912,9 @@ elif page == "Reports & Export":
             quality_export = pd.DataFrame({"Column": df.columns.astype(str), "Data_Type": df.dtypes.astype(str).values, "Missing_Count": df.isna().sum().values, "Missing_Percent": (df.isna().mean().values * 100).round(3)})
             quality_export.to_excel(writer, sheet_name="Data_Quality", index=False)
             df.describe(include="all").transpose().to_excel(writer, sheet_name="Descriptive")
+            _saved_results = st.session_state.get("analysis_results", [])
             last = st.session_state.last_result or {"Status": "No statistical result calculated in this session"}
-            result_df = pd.DataFrame([last])
+            result_df = pd.DataFrame(_saved_results if _saved_results else [last])
             result_df.to_excel(writer, sheet_name="Statistical_Tests", index=False)
             regression_df = result_df if "regression" in str(last.get("title", "")).lower() else pd.DataFrame([{"Status": "No regression model calculated in this session"}])
             regression_df.to_excel(writer, sheet_name="Regression", index=False)
@@ -952,10 +985,15 @@ elif page == "Reports & Export":
             _doc.add_heading("Descriptive statistics", level=1)
             _desc_doc = df.describe(include="all").transpose().reset_index().rename(columns={"index":"Variable"})
             _add_docx_table(_doc, _desc_doc)
-            _last = st.session_state.last_result or {"Status": "No inferential test recorded in this session"}
-            _doc.add_heading("Statistical analysis", level=1)
-            _result_doc = pd.DataFrame([{"Measure": str(_k), "Result": str(_v)} for _k, _v in _last.items()])
-            _add_docx_table(_doc, _result_doc)
+            _last_results = st.session_state.get("analysis_results", [])
+            _doc.add_heading("Statistical analyses performed", level=1)
+            if _last_results:
+                for _ri, _last in enumerate(_last_results, 1):
+                    _doc.add_heading(f"{_ri}. {_last.get('title','Statistical test')}", level=2)
+                    _result_doc = pd.DataFrame([{"Measure": str(_k), "Result": str(_v)} for _k, _v in _last.items() if _k != "title"])
+                    _add_docx_table(_doc, _result_doc)
+            else:
+                _doc.add_paragraph("No inferential test recorded in this session.")
             _numeric_doc = df.select_dtypes(include=np.number)
             if len(_numeric_doc.columns) > 1:
                 _doc.add_heading("Correlation matrix", level=1)
@@ -967,6 +1005,25 @@ elif page == "Reports & Export":
             st.download_button("Download complete Word report", _docx_buffer.getvalue(), "statnova_complete_report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="standard_docx_export")
         except Exception as _docx_error:
             st.warning(f"Word export unavailable: {_docx_error}")
+        _all_results = st.session_state.get("analysis_results", [])
+        st.subheader("All statistical tests performed")
+        if _all_results:
+            _results_frame = pd.DataFrame(_all_results)
+            st.dataframe(_results_frame, use_container_width=True)
+            _all_doc = _DOCX_Document()
+            _all_doc.add_heading("STATNOVA — Complete Statistical Analysis Report", 0)
+            _all_doc.add_paragraph(f"Source: {st.session_state.source_name} | Tests: {len(_all_results)} | Generated: {datetime.now():%Y-%m-%d %H:%M}")
+            for _i, _res in enumerate(_all_results, 1):
+                _all_doc.add_heading(f"{_i}. {_res.get('title','Statistical test')}", level=1)
+                for _k, _v in _res.items():
+                    if _k != "title": _all_doc.add_paragraph(f"{_k}: {_v}")
+            _all_doc_buf = io.BytesIO(); _all_doc.save(_all_doc_buf)
+            st.download_button("Download all tests — Word", _all_doc_buf.getvalue(), "statnova_all_tests.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="all_tests_docx")
+            _all_pdf = build_pdf_report(df, st.session_state.source_name, {f"Test {i+1} — {r.get('title','')}": str({k:v for k,v in r.items() if k != 'title'}) for i,r in enumerate(_all_results)})
+            st.download_button("Download all tests — PDF", _all_pdf, "statnova_all_tests.pdf", "application/pdf", key="all_tests_pdf")
+        else:
+            st.info("Run one or more statistical tests first; the complete report will collect them here.")
+
         try:
             import pyreadstat as _pyreadstat
             _sav_buffer = io.BytesIO()
@@ -975,7 +1032,9 @@ elif page == "Reports & Export":
         except Exception:
             st.caption("SPSS .sav export becomes available after installing pyreadstat from requirements.txt. CSV and Excel remain available meanwhile.")
         try:
-            pdf_bytes = build_pdf_report(df, st.session_state.source_name, st.session_state.last_result)
+            _saved_results = st.session_state.get("analysis_results", [])
+            _pdf_result_payload = ({f"Test {i+1} — {r.get('title','')}": str({k:v for k,v in r.items() if k != 'title'}) for i,r in enumerate(_saved_results)} if _saved_results else st.session_state.last_result)
+            pdf_bytes = build_pdf_report(df, st.session_state.source_name, _pdf_result_payload)
             st.download_button(
                 "Download PDF report", pdf_bytes,
                 "statnova_research_summary.pdf", "application/pdf"
@@ -1088,6 +1147,8 @@ elif page == "Smart Research Analyzer":
                 st.info("No analyzable columns were detected.")
 
         _sra_results = []
+        if "sra_test_history" not in st.session_state:
+            st.session_state.sra_test_history = []
         with st.expander("4 · Guided statistical analysis", expanded=True):
             st.caption("Choose the study design explicitly. STATNOVA does not infer pairing, randomization, or causality from column names.")
             _sra_design = st.selectbox("Study design", ["Independent groups", "Paired measurements", "One-sample comparison", "Association / correlation", "Prediction / regression"], key="sra_design")
@@ -1202,6 +1263,16 @@ elif page == "Smart Research Analyzer":
                     else: st.info("Select at least one predictor.")
                 else: st.info("Regression requires at least two numeric variables.")
 
+        # Persist completed Smart Analysis tests across Streamlit reruns and design changes.
+        for _sra_record in _sra_results:
+            _sra_payload = json.dumps(_sra_record, sort_keys=True, default=str, ensure_ascii=False)
+            _sra_key = hashlib.sha256(_sra_payload.encode("utf-8")).hexdigest()
+            if not any(x.get("_history_key") == _sra_key for x in st.session_state.sra_test_history):
+                _sra_saved = dict(_sra_record)
+                _sra_saved["_history_key"] = _sra_key
+                _sra_saved["Generated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.session_state.sra_test_history.append(_sra_saved)
+
         with st.expander("5 · Research context and interpretation", expanded=True):
             _sra_question = st.text_input("Research question / objective", key="sra_research_question", placeholder="e.g., Is the mean outcome different between the two study groups?")
             _sra_population = st.text_input("Study population / sample", key="sra_population", placeholder="Briefly describe participants or experimental units")
@@ -1209,6 +1280,27 @@ elif page == "Smart Research Analyzer":
             if _sra_results:
                 _sra_res_df = pd.DataFrame(_sra_results)
                 st.dataframe(_sra_res_df, use_container_width=True, hide_index=True)
+                st.markdown("#### Download each Smart Analysis test")
+                for _sra_i, _sra_item in enumerate(_sra_results):
+                    _sra_title = str(_sra_item.get("Analysis", f"Test {_sra_i+1}"))
+                    _sra_safe = re.sub(r"[^A-Za-z0-9_-]+", "_", _sra_title).strip("_") or f"test_{_sra_i+1}"
+                    _sra_one_doc = io.BytesIO()
+                    try:
+                        from docx import Document as _SmartOneDoc
+                        _sdoc = _SmartOneDoc()
+                        _sdoc.add_heading(f"STATNOVA — {_sra_title}", 0)
+                        _sdoc.add_paragraph(f"Source: {_sra_source}")
+                        _sdoc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        for _sk, _sv in _sra_item.items():
+                            _sdoc.add_paragraph(f"{_sk}: {_sv}")
+                        _sdoc.save(_sra_one_doc)
+                        _sra_one_doc.seek(0)
+                        _sdl1, _sdl2 = st.columns(2)
+                        _sdl1.download_button("Download this test — Word", _sra_one_doc.getvalue(), f"STATNOVA_{_sra_safe}.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key=f"sra_ind_docx_{_sra_i}_{hashlib.md5(_sra_safe.encode()).hexdigest()[:8]}")
+                        _sra_one_pdf = build_pdf_report(_sra_df, _sra_source, {_sra_title: _sra_item})
+                        _sdl2.download_button("Download this test — PDF", _sra_one_pdf, f"STATNOVA_{_sra_safe}.pdf", "application/pdf", key=f"sra_ind_pdf_{_sra_i}_{hashlib.md5(_sra_safe.encode()).hexdigest()[:8]}")
+                    except Exception as _sra_ind_err:
+                        st.warning(f"Individual export could not be generated: {_sra_ind_err}")
                 _sra_main = _sra_results[-1]
                 _sra_pval = _sra_main.get("p-value", np.nan)
                 _sra_analysis = str(_sra_main.get("Analysis", "Statistical analysis"))
@@ -1250,7 +1342,7 @@ elif page == "Smart Research Analyzer":
                 "\n\n".join([f"{c}:\n{_sra_df[c].value_counts(dropna=False).head(30).to_string()}" for c in _sra_categorical.columns]) if len(_sra_categorical.columns) else "No categorical variables.",
                 "", "CORRELATION MATRIX (numeric variables):",
                 _sra_numeric.corr().round(4).to_string() if len(_sra_numeric.columns) > 1 else "Not available: fewer than two numeric variables.",
-                "", "STATISTICAL RESULTS:", _sra_res_df.to_string(index=False),
+                "", "STATISTICAL RESULTS:", pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history]).to_string(index=False) if st.session_state.sra_test_history else "No inferential tests recorded.",
                 "", "ENGLISH INTERPRETATION:", _sra_edit_en,
                 "", "ARABIC INTERPRETATION:", _sra_edit_ar,
                 "", "ASSUMPTIONS, EFFECT SIZES AND CONFIDENCE INTERVALS:",
@@ -1287,7 +1379,7 @@ elif page == "Smart Research Analyzer":
             with pd.ExcelWriter(_sra_excel, engine="openpyxl") as _sra_writer:
                 _sra_df.to_excel(_sra_writer, sheet_name="Data", index=False)
                 _sra_profile.to_excel(_sra_writer, sheet_name="Variable_Profile", index=False)
-                _sra_res_df.to_excel(_sra_writer, sheet_name="Analysis_Results", index=False)
+                pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history]).to_excel(_sra_writer, sheet_name="Analysis_Results", index=False)
                 pd.DataFrame([{"Research question": st.session_state.get("sra_research_question", ""), "Population": st.session_state.get("sra_population", ""), "English interpretation": _sra_edit_en, "Arabic interpretation": _sra_edit_ar}]).to_excel(_sra_writer, sheet_name="Interpretation", index=False)
                 _sra_missing.to_excel(_sra_writer, sheet_name="Data_Quality", index=False)
                 _sra_desc.to_excel(_sra_writer, sheet_name="Descriptive_Statistics")
@@ -1369,7 +1461,8 @@ elif page == "Smart Research Analyzer":
                     for _cat_col in _sra_cat_cols:
                         _cat_counts = _sra_df[_cat_col].value_counts(dropna=False).head(30).rename_axis("Category").reset_index(name="Frequency")
                         _sra_add_table(_cat_counts, f"Frequency table — {_cat_col}", 30, _include_index=False)
-                _sra_add_table(_sra_res_df, "Statistical results", 100, _include_index=False)
+                _sra_history_df = pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history])
+                _sra_add_table(_sra_history_df if not _sra_history_df.empty else _sra_res_df, "Statistical results — all tests in this session", 100, _include_index=False)
                 _sra_doc.add_heading("English interpretation", level=1)
                 _sra_doc.add_paragraph(str(_sra_edit_en or "Not provided"))
                 _sra_doc.add_heading("Arabic interpretation", level=1)
@@ -1478,7 +1571,8 @@ elif page == "Smart Research Analyzer":
                     for _cat_col in _sra_cat_cols:
                         _cat_counts = _sra_df[_cat_col].value_counts(dropna=False).head(30).rename_axis("Category").reset_index(name="Frequency")
                         _sra_pdf_table(_cat_counts, f"Frequency table — {_cat_col}", 30, _include_index=False)
-                _sra_pdf_table(_sra_res_df, "Statistical results", 100, _include_index=False)
+                _sra_history_df = pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history])
+                _sra_pdf_table(_sra_history_df if not _sra_history_df.empty else _sra_res_df, "Statistical results — all tests in this session", 100, _include_index=False)
                 _sra_story.append(_SRA_Paragraph("English interpretation", _sra_heading))
                 _sra_story.append(_SRA_Paragraph(_SRA_html.escape(str(_sra_edit_en or "Not provided")), _sra_body))
                 _sra_story.append(_SRA_Paragraph("Arabic interpretation", _sra_heading))
@@ -1498,6 +1592,7 @@ elif page == "Smart Research Analyzer":
                         _sra_story.append(_SRA_Spacer(1, 8))
                 _SRA_PDFDoc(_sra_pdf, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=38, bottomMargin=38).build(_sra_story)
                 st.download_button("Download PDF report", _sra_pdf.getvalue(), "statnova_smart_research_report.pdf", "application/pdf", key="sra_pdf_export")
+                st.caption("The complete report above includes every distinct Smart Analysis test recorded in this session.")
             except Exception as _sra_pdf_exc:
                 st.caption(f"PDF export unavailable: {_sra_pdf_exc}. Ensure arabic-reshaper, python-bidi, and the bundled Arabic font are included.")
 
