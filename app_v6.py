@@ -148,7 +148,7 @@ def interpret_statistical_result(title, statistic, pvalue, alpha=0.05, note="", 
     elif "anova" in title_key or "analysis of variance" in title_key:
         label = "F statistic"
     elif "t-test" in title_key or "t test" in title_key or "student" in title_key:
-        label = "t statistic"
+        label = "Student's t-statistic (t)"
     elif "z-test" in title_key or "z test" in title_key:
         label = "Z statistic"
     elif "regression" in title_key:
@@ -770,9 +770,17 @@ elif page == "Statistical Tests":
                                 raise ValueError("Each selected group needs at least two valid observations.")
                             if test == "Independent samples t-test (Welch)":
                                 stat, p = ttest_ind(a, b, equal_var=False)
+                                # Welch–Satterthwaite degrees of freedom (unequal variances)
+                                va, vb = float(np.var(a, ddof=1)), float(np.var(b, ddof=1))
+                                na, nb = len(a), len(b)
+                                se2 = va / na + vb / nb
+                                welch_df = (se2 ** 2 / (((va / na) ** 2 / (na - 1)) + ((vb / nb) ** 2 / (nb - 1)))) if se2 > 0 else float("nan")
+                                note = (f"{level1}: n = {na}, mean = {np.mean(a):.6g}, SD = {np.std(a, ddof=1):.6g}; "
+                                        f"{level2}: n = {nb}, mean = {np.mean(b):.6g}, SD = {np.std(b, ddof=1):.6g}; "
+                                        f"Welch degrees of freedom: {welch_df:.6g}.")
                             else:
                                 stat, p = mannwhitneyu(a, b, alternative="two-sided")
-                            note = f"{level1}: n = {len(a)}; {level2}: n = {len(b)}."
+                                note = f"{level1}: n = {len(a)}; {level2}: n = {len(b)}."
 
                         else:
                             if group_col is None:
