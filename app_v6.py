@@ -128,48 +128,18 @@ def categorical_columns(df):
     return df.select_dtypes(exclude=np.number).columns.tolist()
 
 def p_text(p):
-    """Format p-values without rounding extremely small values to an apparent zero."""
+    """Display p-values without rounding tiny values to zero."""
     try:
         p = float(p)
     except (TypeError, ValueError):
         return "N/A"
-    if not np.isfinite(p):
+    if not np.isfinite(p) or p < 0 or p > 1:
         return "N/A"
-    if p < 0:
-        return "N/A"
+    if p == 0:
+        return "< machine precision (reported as 0 by numerical underflow)"
     if p < 0.0001:
         return "<0.0001"
     return f"{p:.4f}" if p < 0.1 else f"{p:.4g}"
-
-
-def screen_plausibility_ranges(dataframe, numeric_columns):
-    """Flag name-informed, common range concerns; never alter or delete observations."""
-    flags = []
-    for column in numeric_columns:
-        values = pd.to_numeric(dataframe[column], errors="coerce")
-        name = str(column).lower()
-        mask = pd.Series(False, index=dataframe.index)
-        reason = None
-        examples = []
-        if any(token in name for token in ("percent", "percentage", "attendance", "نسبة", "مئوية")):
-            mask = values.notna() & ((values < 0) | (values > 100))
-            reason = "Percentage is outside 0–100; verify the variable definition and scale."
-        elif "sleep" in name or "نوم" in name:
-            mask = values.notna() & ((values < 0) | (values > 16))
-            reason = "Sleep duration outside 0–16 hours; verify units and entry."
-        elif any(token in name for token in ("satisfaction", "likert", "rating_1_5", "score_1_5")):
-            mask = values.notna() & ((values < 1) | (values > 5))
-            reason = "Value outside the commonly used 1–5 scale; confirm the actual instrument range."
-        elif "age" in name or "العمر" in name:
-            mask = values.notna() & ((values < 0) | (values > 120))
-            reason = "Age outside 0–120 years; verify units and entry."
-        elif "score" in name or "mark" in name or "درجة" in name:
-            mask = values.notna() & ((values < 0) | (values > 100))
-            reason = "Value outside 0–100; review only if the instrument maximum is 100."
-        if reason and bool(mask.any()):
-            examples = values[mask].head(5).tolist()
-            flags.append({"Variable": column, "Flagged n": int(mask.sum()), "Example values": ", ".join(map(str, examples)), "Review note": reason})
-    return pd.DataFrame(flags, columns=["Variable", "Flagged n", "Example values", "Review note"])
 
 def interpret_statistical_result(title, statistic, pvalue, alpha=0.05, note="", n=None):
     """Create method-aware bilingual interpretation without inventing uncomputed estimates."""
@@ -1309,23 +1279,10 @@ elif page == "Smart Research Analyzer":
                     _sra_nout = int(((_sra_x < _sra_low) | (_sra_x > _sra_high)).sum())
                     _sra_outlier_rows.append({"Variable": _sra_col, "Potential outliers (IQR rule)": _sra_nout, "Lower fence": _sra_low, "Upper fence": _sra_high})
             if _sra_outlier_rows:
-                st.write("Potential outliers (IQR screening only; not errors by definition)")
+                st.write("Potential outliers (screening only; not errors by definition)")
                 st.dataframe(pd.DataFrame(_sra_outlier_rows), use_container_width=True, hide_index=True)
-            _sra_range_flags = screen_plausibility_ranges(_sra_df, _sra_num)
-            if not _sra_range_flags.empty:
-                st.write("Potential range or unit issues (name-informed screening)")
-                st.dataframe(_sra_range_flags, use_container_width=True, hide_index=True)
-                st.warning("These are review flags, not proof of incorrect data. Confirm the scale, units, and study protocol before analysis.")
-            _sra_id_review = []
-            for _sra_id_col in _sra_id_candidates:
-                _sra_id_series = _sra_df[_sra_id_col]
-                _sra_id_review.append({"Identifier": _sra_id_col, "Missing IDs": int(_sra_id_series.isna().sum()), "Repeated non-missing IDs": int(_sra_id_series.dropna().duplicated().sum()), "Unique IDs": int(_sra_id_series.nunique(dropna=True))})
-            if _sra_id_review:
-                st.write("Identifier integrity check")
-                st.dataframe(pd.DataFrame(_sra_id_review), use_container_width=True, hide_index=True)
-            if _sra_dup:
-                st.caption(f"Exact duplicate rows detected: {_sra_dup}. Review them against the source; repeated rows are not automatically removed.")
             st.warning("No rows or values are automatically deleted, imputed, or changed. Investigate flagged values against the source records and study protocol.")
+            st.caption("For wide-format pre/post data, each row is treated as one participant record. If a recognized participant ID column is present, missing IDs are excluded from automatic paired analysis and repeated IDs stop that automatic analysis to avoid ambiguous matching. No records are silently rearranged or merged.")
 
         with st.expander("3 · Descriptive statistics", expanded=True):
             if _sra_num:
@@ -1348,11 +1305,23 @@ elif page == "Smart Research Analyzer":
             if _sra_pair_tokens_found:
                 _sra_pre_suggest, _sra_post_suggest = _sra_pair_suggestion
                 st.success(f"Possible repeated-measures structure detected: {_sra_pre_suggest} → {_sra_post_suggest}")
-                st.caption("Name matching is not proof of pairing. Confirm that each row represents the same participant/unit in both columns and that row order is aligned.")
-                _sra_confirm_auto_pair = st.checkbox("I confirm these are paired measurements from the same participants/units, aligned row by row", key="sra_auto_pair_confirm")
+                st.caption("Name matching is not proof of pairing. Confirm that each row is one participant/unit record and that the pre/post values in that row belong to the same unit.")
+                _sra_confirm_auto_pair = st.checkbox("I confirm these are paired measurements from the same participants/units, with one participant record per row", key="sra_auto_pair_confirm")
                 if _sra_confirm_auto_pair:
-                    _sra_auto_pair = _sra_df[[_sra_pre_suggest, _sra_post_suggest]].apply(pd.to_numeric, errors="coerce").dropna()
-                    if len(_sra_auto_pair) >= 2:
+                    _sra_pair_source = _sra_df.copy()
+                    _sra_id_candidates = [c for c in _sra_df.columns if str(c).strip().lower() in {"participant_id", "participant id", "subject_id", "subject id", "patient_id", "patient id", "id"}]
+                    _sra_pair_id = _sra_id_candidates[0] if _sra_id_candidates else None
+                    _sra_pair_blocked = False
+                    if _sra_pair_id is not None:
+                        _sra_id_values = _sra_pair_source[_sra_pair_id].dropna().astype(str).str.strip()
+                        _sra_duplicate_ids = _sra_id_values[_sra_id_values.duplicated(keep=False)].unique().tolist()
+                        if _sra_duplicate_ids:
+                            _sra_pair_blocked = True
+                            st.error(f"Automatic paired analysis stopped: {_sra_pair_id} contains repeated participant identifiers. Resolve the repeated IDs or define the correct repeated-measures structure before testing.")
+                        else:
+                            _sra_pair_source = _sra_pair_source.loc[_sra_pair_source[_sra_pair_id].notna() & _sra_pair_source[_sra_pair_id].astype(str).str.strip().ne("")].copy()
+                    _sra_auto_pair = _sra_pair_source[[_sra_pre_suggest, _sra_post_suggest]].apply(pd.to_numeric, errors="coerce").dropna()
+                    if not _sra_pair_blocked and len(_sra_auto_pair) >= 2:
                         _sra_pre_vals = _sra_auto_pair[_sra_pre_suggest].astype(float)
                         _sra_post_vals = _sra_auto_pair[_sra_post_suggest].astype(float)
                         _sra_gain = _sra_post_vals - _sra_pre_vals
@@ -1377,7 +1346,7 @@ elif page == "Smart Research Analyzer":
                             from scipy.stats import shapiro as _sra_shapiro
                             if 3 <= _sra_npair <= 5000:
                                 _sra_sw, _sra_sp = _sra_shapiro(_sra_gain)
-                                st.caption(f"Normality screening of paired differences (Shapiro–Wilk): W = {_sra_sw:.4f}, p = {p_text(_sra_sp)}. Treat this as a diagnostic, not an automatic test-selection rule.")
+                                st.caption(f"Normality screening of paired differences (Shapiro–Wilk): W = {_sra_sw:.4f}, p = {_sra_sp:.5g}. Treat this as a diagnostic, not an automatic test-selection rule.")
                         except Exception:
                             pass
                         st.caption("Primary estimate is post − pre. The confidence interval and Cohen's dz describe the within-participant change; review the difference distribution and study design before reporting.")
@@ -1386,7 +1355,7 @@ elif page == "Smart Research Analyzer":
                         _sra_group_candidates = [c for c in _sra_cat if _sra_df[c].dropna().nunique() == 2]
                         if _sra_group_candidates:
                             _sra_gain_group = st.selectbox("Optional: compare change between two independent groups", _sra_group_candidates, key="sra_auto_gain_group")
-                            _sra_gain_frame = _sra_df[[_sra_pre_suggest, _sra_post_suggest, _sra_gain_group]].copy()
+                            _sra_gain_frame = _sra_pair_source[[_sra_pre_suggest, _sra_post_suggest, _sra_gain_group]].copy()
                             _sra_gain_frame["_gain"] = pd.to_numeric(_sra_gain_frame[_sra_post_suggest], errors="coerce") - pd.to_numeric(_sra_gain_frame[_sra_pre_suggest], errors="coerce")
                             _sra_gain_frame = _sra_gain_frame.dropna(subset=["_gain", _sra_gain_group])
                             _sra_levels = _sra_gain_frame[_sra_gain_group].dropna().unique().tolist()
@@ -1405,6 +1374,10 @@ elif page == "Smart Research Analyzer":
                                     _sra_gci_u = _sra_gdiff + _sra_gcrit*np.sqrt(_sra_gse2) if np.isfinite(_sra_gcrit) else np.nan
                                     _sra_gpool = np.sqrt(((len(_sra_ga)-1)*_sra_gv1 + (len(_sra_gb)-1)*_sra_gv2)/(len(_sra_ga)+len(_sra_gb)-2))
                                     _sra_gd = _sra_gdiff/_sra_gpool if _sra_gpool > 0 else np.nan
+                                    if np.isfinite(_sra_gd) and _sra_gpool < 1e-8:
+                                        st.warning("The pooled within-group SD is approximately zero. Cohen's d is undefined or numerically unstable; inspect the group distributions and raw change scores.")
+                                    elif np.isfinite(_sra_gd) and abs(_sra_gd) >= 2:
+                                        st.info("Cohen's d is very large. This can occur when within-group variability is very small; inspect the raw distributions and measurement scale. The value is not automatically an error.")
                                     _sra_results.append({"Analysis": "Welch independent t-test on change scores", "Outcome": "Post − pre change", "Grouping": _sra_gain_group, "Group 1": str(_sra_levels[0]), "n1": len(_sra_ga), "Mean change 1": float(_sra_ga.mean()), "Group 2": str(_sra_levels[1]), "n2": len(_sra_gb), "Mean change 2": float(_sra_gb.mean()), "Mean difference in change": _sra_gdiff, "95% CI lower": _sra_gci_l, "95% CI upper": _sra_gci_u, "Statistic (t)": float(_sra_gt), "df": _sra_gdf, "p-value": float(_sra_gp), "Effect size (Cohen d)": _sra_gd})
                                     st.write(f"**Between-group comparison of change scores:** { _sra_levels[0] } vs { _sra_levels[1] } · t = {_sra_gt:.4f}, df = {_sra_gdf:.3f}, p = {p_text(_sra_gp)}, mean difference = {_sra_gdiff:.3f}, 95% CI [{_sra_gci_l:.3f}, {_sra_gci_u:.3f}]")
                     else:
@@ -1438,7 +1411,7 @@ elif page == "Smart Research Analyzer":
                                 _sra_eff, _sra_effect_label = np.nan, "Effect size not calculated for this test"
                             _sra_results.append({"Analysis": _sra_method, "Outcome": _sra_y, "Grouping": _sra_g, "Group 1": str(_sra_groups[0]), "n1": len(_sra_x1), "Mean 1": _sra_x1.mean(), "Group 2": str(_sra_groups[1]), "n2": len(_sra_x2), "Mean 2": _sra_x2.mean(), "Statistic": _sra_stat, "p-value": _sra_p, "Effect size": _sra_eff, "Effect metric": _sra_effect_label})
                             st.write(f"**{_sra_method}** · {_sra_y} by {_sra_g}")
-                            st.metric("p-value", p_text(_sra_p))
+                            st.metric("p-value", f"{_sra_p:.5g}")
                             st.write(f"Statistic = {_sra_stat:.5g}; n₁ = {len(_sra_x1)}, n₂ = {len(_sra_x2)}")
                             if np.isfinite(_sra_p):
                                 st.write("Statistically significant at the selected α." if _sra_p < _sra_alpha else "Not statistically significant at the selected α.")
@@ -1452,7 +1425,7 @@ elif page == "Smart Research Analyzer":
                         if len(_sra_samples) >= 2:
                             _sra_stat, _sra_p = f_oneway(*_sra_samples) if _sra_method == "One-way ANOVA" else kruskal(*_sra_samples)
                             _sra_results.append({"Analysis": _sra_method, "Outcome": _sra_y, "Grouping": _sra_g, "Groups analyzed": len(_sra_samples), "Statistic": _sra_stat, "p-value": _sra_p})
-                            st.metric("p-value", p_text(_sra_p))
+                            st.metric("p-value", f"{_sra_p:.5g}")
                             st.write(f"{_sra_method}: statistic = {_sra_stat:.5g}; groups analyzed = {len(_sra_samples)}")
                             st.caption("An omnibus result does not identify which groups differ. Use a justified post-hoc procedure with multiplicity control.")
                         else:
@@ -1482,7 +1455,7 @@ elif page == "Smart Research Analyzer":
                             _sra_ci_l_guided = _sra_diff.mean()-_sra_pair_crit_guided*_sra_pair_se_guided if np.isfinite(_sra_pair_crit_guided) else np.nan
                             _sra_ci_u_guided = _sra_diff.mean()+_sra_pair_crit_guided*_sra_pair_se_guided if np.isfinite(_sra_pair_crit_guided) else np.nan
                             _sra_results.append({"Analysis": _sra_test, "Measurement 1": _sra_before, "Measurement 2": _sra_after, "Paired n": len(_sra_pair), "Mean change (post − pre)": _sra_diff.mean(), "95% CI lower": _sra_ci_l_guided, "95% CI upper": _sra_ci_u_guided, "Statistic (t or W)": _sra_stat, "df": _sra_pair_df_guided, "p-value": _sra_p, "Effect size (Cohen dz)": _sra_dz})
-                            st.metric("p-value", p_text(_sra_p))
+                            st.metric("p-value", f"{_sra_p:.5g}")
                             st.write(f"Paired n = {len(_sra_pair)} · Mean change (post − pre) = {_sra_diff.mean():.4g} · Cohen's dz = {_sra_dz:.3f}" if np.isfinite(_sra_dz) else f"Paired n = {len(_sra_pair)} · Mean change (post − pre) = {_sra_diff.mean():.4g}")
                             if _sra_test == "Paired t-test": st.write(f"t = {_sra_stat:.4f}; df = {_sra_pair_df_guided}; 95% CI = [{_sra_ci_l_guided:.4g}, {_sra_ci_u_guided:.4g}]")
                         else:
@@ -1499,7 +1472,7 @@ elif page == "Smart Research Analyzer":
                     if len(_sra_vals) >= 2:
                         _sra_stat, _sra_p = ttest_1samp(_sra_vals, _sra_mu)
                         _sra_results.append({"Analysis": "One-sample t-test", "Variable": _sra_y, "Reference": _sra_mu, "n": len(_sra_vals), "Mean": _sra_vals.mean(), "Statistic": _sra_stat, "p-value": _sra_p})
-                        st.metric("p-value", p_text(_sra_p))
+                        st.metric("p-value", f"{_sra_p:.5g}")
                         st.write(f"Mean = {_sra_vals.mean():.4g}; reference = {_sra_mu:g}; n = {len(_sra_vals)}")
                 else: st.info("No numeric variable is available.")
             elif _sra_design == "Association / correlation":
@@ -1513,7 +1486,7 @@ elif page == "Smart Research Analyzer":
                         _sra_r, _sra_p = pearsonr(_sra_xy[_sra_x], _sra_xy[_sra_y]) if _sra_method == "Pearson" else spearmanr(_sra_xy[_sra_x], _sra_xy[_sra_y])
                         _sra_results.append({"Analysis": _sra_method + " correlation", "Variable X": _sra_x, "Variable Y": _sra_y, "n": len(_sra_xy), "Coefficient": _sra_r, "p-value": _sra_p})
                         st.metric("Correlation coefficient", f"{_sra_r:.4f}")
-                        st.metric("p-value", p_text(_sra_p))
+                        st.metric("p-value", f"{_sra_p:.5g}")
                         st.caption("Correlation describes association; it does not establish causation.")
                         st.scatter_chart(_sra_xy, x=_sra_x, y=_sra_y)
                     else: st.warning("At least three complete paired observations are required.")
@@ -1594,7 +1567,7 @@ elif page == "Smart Research Analyzer":
                         _sra_interpretation_ar = _sra_interp["interpretation_ar"]
                     else:
                         _sra_interpretation_en = f"The {_sra_analysis} produced a p-value of {_sra_pval:.5g}. " + ("The result is statistically significant at the selected alpha level; assess the effect estimate, uncertainty, assumptions, and practical relevance before drawing a conclusion." if _sra_pval < _sra_alpha else "The result is not statistically significant at the selected alpha level. This does not prove that no effect or association exists; consider the estimate, confidence interval, sample size, and study limitations.")
-                        _sra_interpretation_ar = f"أظهر تحليل {_sra_analysis} قيمة احتمالية p = {p_text(_sra_pval)}. " + ("النتيجة ذات دلالة إحصائية عند مستوى الدلالة المختار؛ ويجب تقييم حجم الأثر وعدم اليقين والافتراضات والأهمية العملية قبل اعتماد الاستنتاج." if _sra_pval < _sra_alpha else "لم تصل النتيجة إلى الدلالة الإحصائية عند مستوى الدلالة المختار. وهذا لا يثبت انعدام الأثر أو الارتباط؛ ينبغي مراجعة التقدير وفاصل الثقة وحجم العينة ومحددات الدراسة.")
+                        _sra_interpretation_ar = f"أظهر تحليل {_sra_analysis} قيمة احتمالية p = {_sra_pval:.5g}. " + ("النتيجة ذات دلالة إحصائية عند مستوى الدلالة المختار؛ ويجب تقييم حجم الأثر وعدم اليقين والافتراضات والأهمية العملية قبل اعتماد الاستنتاج." if _sra_pval < _sra_alpha else "لم تصل النتيجة إلى الدلالة الإحصائية عند مستوى الدلالة المختار. وهذا لا يثبت انعدام الأثر أو الارتباط؛ ينبغي مراجعة التقدير وفاصل الثقة وحجم العينة ومحددات الدراسة.")
                 else:
                     _sra_interpretation_en = f"The {_sra_analysis} was completed, but a valid p-value is unavailable or undefined. No significance conclusion can be made from this result. Check the data, sample sizes, and test assumptions."
                     _sra_interpretation_ar = f"تم إجراء {_sra_analysis}، لكن قيمة p غير متاحة أو غير معرّفة. لذلك لا يمكن إصدار حكم بشأن الدلالة الإحصائية من هذه النتيجة. يُرجى مراجعة البيانات وأحجام العينات وافتراضات الاختبار."
@@ -1623,14 +1596,13 @@ elif page == "Smart Research Analyzer":
                 f"Research question: {st.session_state.get('sra_research_question','')}",
                 f"Population: {st.session_state.get('sra_population','')}",
                 "", "DATA QUALITY AND VARIABLE PROFILE:", _sra_missing.to_string(index=False),
-                "", "POTENTIAL RANGE / UNIT FLAGS:", _sra_range_flags.to_string(index=False) if not _sra_range_flags.empty else "No name-informed range flags were raised.",
                 "", "DESCRIPTIVE STATISTICS (all numeric variables):",
                 _sra_desc.to_string() if not _sra_desc.empty else "No numeric variables available.",
                 "", "CATEGORICAL VARIABLE SUMMARIES:",
                 "\n\n".join([f"{c}:\n{_sra_df[c].value_counts(dropna=False).head(30).to_string()}" for c in _sra_categorical.columns]) if len(_sra_categorical.columns) else "No categorical variables.",
                 "", "CORRELATION MATRIX (numeric variables):",
                 _sra_numeric.corr().round(4).to_string() if len(_sra_numeric.columns) > 1 else "Not available: fewer than two numeric variables.",
-                "", "STATISTICAL RESULTS:", pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history]).to_string(index=False) if st.session_state.sra_test_history else "No inferential tests recorded.",
+                "", "STATISTICAL RESULTS:", (lambda _d: (_d.assign(**{"p-value": _d["p-value"].map(p_text)}).fillna("—") if "p-value" in _d.columns else _d.fillna("—")))(pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history])).to_string(index=False) if st.session_state.sra_test_history else "No inferential tests recorded.",
                 "", "ENGLISH INTERPRETATION:", _sra_edit_en,
                 "", "ARABIC INTERPRETATION:", _sra_edit_ar,
                 "", "ASSUMPTIONS, EFFECT SIZES AND CONFIDENCE INTERVALS:",
@@ -1667,7 +1639,12 @@ elif page == "Smart Research Analyzer":
             with pd.ExcelWriter(_sra_excel, engine="openpyxl") as _sra_writer:
                 _sra_df.to_excel(_sra_writer, sheet_name="Data", index=False)
                 _sra_profile.to_excel(_sra_writer, sheet_name="Variable_Profile", index=False)
-                pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history]).to_excel(_sra_writer, sheet_name="Analysis_Results", index=False)
+                _sra_excel_history = pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history])
+                if not _sra_excel_history.empty:
+                    if "p-value" in _sra_excel_history.columns:
+                        _sra_excel_history["p-value"] = _sra_excel_history["p-value"].map(p_text)
+                    _sra_excel_history = _sra_excel_history.fillna("—")
+                _sra_excel_history.to_excel(_sra_writer, sheet_name="Analysis_Results", index=False)
                 pd.DataFrame([{"Research question": st.session_state.get("sra_research_question", ""), "Population": st.session_state.get("sra_population", ""), "English interpretation": _sra_edit_en, "Arabic interpretation": _sra_edit_ar}]).to_excel(_sra_writer, sheet_name="Interpretation", index=False)
                 _sra_missing.to_excel(_sra_writer, sheet_name="Data_Quality", index=False)
                 _sra_desc.to_excel(_sra_writer, sheet_name="Descriptive_Statistics")
@@ -1750,7 +1727,12 @@ elif page == "Smart Research Analyzer":
                         _cat_counts = _sra_df[_cat_col].value_counts(dropna=False).head(30).rename_axis("Category").reset_index(name="Frequency")
                         _sra_add_table(_cat_counts, f"Frequency table — {_cat_col}", 30, _include_index=False)
                 _sra_history_df = pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history])
-                _sra_add_table(_sra_history_df if not _sra_history_df.empty else _sra_res_df, "Statistical results — all tests in this session", 100, _include_index=False)
+                _sra_history_display = _sra_history_df.copy()
+                if not _sra_history_display.empty:
+                    if "p-value" in _sra_history_display.columns:
+                        _sra_history_display["p-value"] = _sra_history_display["p-value"].map(p_text)
+                    _sra_history_display = _sra_history_display.fillna("—")
+                _sra_add_table(_sra_history_display if not _sra_history_display.empty else _sra_res_df, "Statistical results — all tests in this session", 100, _include_index=False)
                 _sra_doc.add_heading("English interpretation", level=1)
                 _sra_doc.add_paragraph(str(_sra_edit_en or "Not provided"))
                 _sra_doc.add_heading("Arabic interpretation", level=1)
@@ -1789,7 +1771,7 @@ elif page == "Smart Research Analyzer":
                 from bidi.algorithm import get_display as _SRA_get_display
                 _sra_font_path = _SRA_Path(__file__).with_name("NotoNaskhArabic-Regular.ttf")
                 if not _sra_font_path.exists():
-                    raise FileNotFoundError("Arabic font file NotoNaskhArabic-Regular.ttf is missing beside app_v11_final.py")
+                    raise FileNotFoundError("Arabic font file NotoNaskhArabic-Regular.ttf is missing beside the main app file")
                 if "STATNOVAArabic" not in _SRA_pdfmetrics.getRegisteredFontNames():
                     _SRA_pdfmetrics.registerFont(_SRA_TTFont("STATNOVAArabic", str(_sra_font_path)))
                 _sra_pdf = io.BytesIO()
@@ -1860,7 +1842,12 @@ elif page == "Smart Research Analyzer":
                         _cat_counts = _sra_df[_cat_col].value_counts(dropna=False).head(30).rename_axis("Category").reset_index(name="Frequency")
                         _sra_pdf_table(_cat_counts, f"Frequency table — {_cat_col}", 30, _include_index=False)
                 _sra_history_df = pd.DataFrame([{k:v for k,v in x.items() if k != "_history_key"} for x in st.session_state.sra_test_history])
-                _sra_pdf_table(_sra_history_df if not _sra_history_df.empty else _sra_res_df, "Statistical results — all tests in this session", 100, _include_index=False)
+                _sra_history_display = _sra_history_df.copy()
+                if not _sra_history_display.empty:
+                    if "p-value" in _sra_history_display.columns:
+                        _sra_history_display["p-value"] = _sra_history_display["p-value"].map(p_text)
+                    _sra_history_display = _sra_history_display.fillna("—")
+                _sra_pdf_table(_sra_history_display if not _sra_history_display.empty else _sra_res_df, "Statistical results — all tests in this session", 100, _include_index=False)
                 _sra_story.append(_SRA_Paragraph("English interpretation", _sra_heading))
                 _sra_story.append(_SRA_Paragraph(_SRA_html.escape(str(_sra_edit_en or "Not provided")), _sra_body))
                 _sra_story.append(_SRA_Paragraph("Arabic interpretation", _sra_heading))
